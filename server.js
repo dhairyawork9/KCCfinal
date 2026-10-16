@@ -103,6 +103,11 @@ Please select your language / ભાષા પસંદ કરો:
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log('KAUSHALYA COMPUTER CENTRE Dual-Language bot engine is running bug-free on port ' + PORT);
-});
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log('Server is running on port ' + PORT);
+    });
+}
+
+// Export the Express app for Vercel serverless functions
+module.exports = app;
