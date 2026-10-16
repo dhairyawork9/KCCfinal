@@ -73,7 +73,7 @@ Please select your language / ભાષા પસંદ કરો:
                     if (text === 'menu' || text === 'back') {
                         reply = "English Main Menu: Type '1' for Courses, '2' for Products. Type 'start' to restart.";
                     } else {
-                        else if (text === '1' || text.includes('1'))  else if (text.includes('ai')) { reply = `AI & Machine Learning with Python Course Details.`; } else if (text.includes('basic')) { reply = `Basic Computer & Hardware Repair Training.`; }  if(!reply) { reply = `English Courses Menu`; } } else if (text === '2' || text.includes('2')) { else if (text.includes('laptop')) { reply = `Laptops, Desktops & Custom Builds Pricing.`; }  if(!reply) { reply = `English Products Menu`; } } 
+                        else if (text === '1' || text.includes('1')) { if (text.includes('ai')) { reply = `AI & Machine Learning with Python Course Details.`; } else if (text.includes('basic')) { reply = `Basic Computer & Hardware Repair Training.`; }  if(!reply) { reply = `English Courses Menu`; } } else if (text === '2' || text.includes('2')) { if (text.includes('laptop')) { reply = `Laptops, Desktops & Custom Builds Pricing.`; }  if(!reply) { reply = `English Products Menu`; } } 
                         if (!reply) {
                             reply = "Invalid option. Type 'menu' to view options or 'start' to restart.";
                         }
@@ -84,7 +84,7 @@ Please select your language / ભાષા પસંદ કરો:
                     if (text === 'menu' || text === 'back') {
                         reply = "ગુજરાતી મુખ્ય મેનુ: કોર્સ માટે '1', પ્રોડક્ટ માટે '2' લખો. ફરી શરૂ કરવા માટે 'start' લખો.";
                     } else {
-                        else if (text === '1' || text.includes('1')) { else if (text.includes('ai')) { reply = `AI અને મશીન લર્નિંગ કોર્સની વિગતો.`; } else if (text.includes('basic')) { reply = `બેઝિક કોમ્પ્યુટર અને હાર્ડવેર તાલીમ.`; }  if(!reply) { reply = `ગુજરાતી કોર્સ મેનુ (Courses)`; } } else if (text === '2' || text.includes('2')) { else if (text.includes('laptop')) { reply = `લેપટોપ અને ડેસ્કટોપની કિંમત.`; }  if(!reply) { reply = `ગુજરાતી પ્રોડક્ટ મેનુ (Products)`; } } 
+                        else if (text === '1' || text.includes('1')) { if (text.includes('ai')) { reply = `AI અને મશીન લર્નિંગ કોર્સની વિગતો.`; } else if (text.includes('basic')) { reply = `બેઝિક કોમ્પ્યુટર અને હાર્ડવેર તાલીમ.`; }  if(!reply) { reply = `ગુજરાતી કોર્સ મેનુ (Courses)`; } } else if (text === '2' || text.includes('2')) { if (text.includes('laptop')) { reply = `લેપટોપ અને ડેસ્કટોપની કિંમત.`; }  if(!reply) { reply = `ગુજરાતી પ્રોડક્ટ મેનુ (Products)`; } } 
                         if (!reply) {
                             reply = "અમાન્ય વિકલ્પ. મેનુ જોવા માટે 'menu' અથવા ફરી શરૂ કરવા 'start' લખો.";
                         }
