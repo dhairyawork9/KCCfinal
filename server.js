@@ -6,13 +6,14 @@ app.use(bodyParser.json());
 
 let userSessions = {};
 
-// 1. Meta Webhook Verification
+// 1. Meta Webhook Verification & Health Check
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = "smartbiz_secure_token";
     let mode = req.query['hub.mode'];
     let token = req.query['hub.verify_token'];
     let challenge = req.query['hub.challenge'];
 
+    // If Meta is verifying the webhook subscription
     if (mode && token) {
         if (mode === 'subscribe' && token === VERIFY_TOKEN) {
             console.log('WEBHOOK_VERIFIED');
@@ -21,7 +22,9 @@ app.get('/webhook', (req, res) => {
             return res.sendStatus(403);
         }
     }
-    return res.sendStatus(400);
+    
+    // Fallback for Meta's general health pings (prevents 400 errors)
+    return res.status(200).send('KCC Webhook Endpoint Active');
 });
 
 // 2. WhatsApp Message Handler
