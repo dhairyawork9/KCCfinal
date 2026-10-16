@@ -73,7 +73,7 @@ Please select your language / ભાષા પસંદ કરો:
                     if (text === 'menu' || text === 'back') {
                         reply = "English Main Menu: Type '1' for Courses, '2' for Products. Type 'start' to restart.";
                     } else {
-                        else if (text === '1' || text.includes('1')) { else if (text.includes('ai')) { reply = `AI & Machine Learning with Python Course Details.`; } else if (text.includes('basic')) { reply = `Basic Computer & Hardware Repair Training.`; }  if(!reply) { reply = `English Courses Menu`; } } else if (text === '2' || text.includes('2')) { else if (text.includes('laptop')) { reply = `Laptops, Desktops & Custom Builds Pricing.`; }  if(!reply) { reply = `English Products Menu`; } } 
+                        else if (text === '1' || text.includes('1'))  else if (text.includes('ai')) { reply = `AI & Machine Learning with Python Course Details.`; } else if (text.includes('basic')) { reply = `Basic Computer & Hardware Repair Training.`; }  if(!reply) { reply = `English Courses Menu`; } } else if (text === '2' || text.includes('2')) { else if (text.includes('laptop')) { reply = `Laptops, Desktops & Custom Builds Pricing.`; }  if(!reply) { reply = `English Products Menu`; } } 
                         if (!reply) {
                             reply = "Invalid option. Type 'menu' to view options or 'start' to restart.";
                         }
