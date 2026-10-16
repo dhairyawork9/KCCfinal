@@ -1,19 +1,50 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const axios = require('axios');
 const app = express();
 
 app.use(bodyParser.json());
 
+// Token & ID configurations (from Vercel Environment Variables or fallbacks)
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; 
+
 let userSessions = {};
+
+// Helper function to send outbound WhatsApp messages via Meta Graph API
+async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
+    if (!WHATSAPP_TOKEN) {
+        console.error("Missing WHATSAPP_TOKEN in Environment Variables.");
+        return;
+    }
+    try {
+        await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+            headers: {
+                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            data: {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: to,
+                type: 'text',
+                text: { body: textBody }
+            }
+        });
+        console.log(`Outbound message delivered to ${to}`);
+    } catch (error) {
+        console.error('Error sending WhatsApp message:', error.response ? error.response.data : error.message);
+    }
+}
 
 // 1. Meta Webhook Verification & Health Check
 app.get('/webhook', (req, res) => {
-    const VERIFY_TOKEN = "smartbiz_secure_token";
     let mode = req.query['hub.mode'];
     let token = req.query['hub.verify_token'];
     let challenge = req.query['hub.challenge'];
 
-    // If Meta is verifying the webhook subscription
     if (mode && token) {
         if (mode === 'subscribe' && token === VERIFY_TOKEN) {
             console.log('WEBHOOK_VERIFIED');
@@ -22,18 +53,19 @@ app.get('/webhook', (req, res) => {
             return res.sendStatus(403);
         }
     }
-    
-    // Fallback for Meta's general health pings (prevents 400 errors)
     return res.status(200).send('KCC Webhook Endpoint Active');
 });
 
 // 2. WhatsApp Message Handler
-app.post('/webhook', (req, res) => {
+app.post('/webhook', async (req, res) => {
     try {
         let body = req.body;
         if (body.object) {
-            let messaging = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-            if (messaging) {
+            let entry = body.entry?.[0]?.changes?.[0]?.value;
+            let messaging = entry?.messages?.[0];
+            let phoneNumberId = entry?.metadata?.phone_number_id;
+
+            if (messaging && phoneNumberId) {
                 let from = messaging.from;
                 let text = messaging.text?.body?.toLowerCase().trim() || "";
                 let reply = "";
@@ -45,12 +77,12 @@ app.post('/webhook', (req, res) => {
                 else if (!userSessions[from]) {
                     if (text === '1' || text.includes('eng')) {
                         userSessions[from] = 'eng';
-                        reply = "English selected! Type '1' for Courses, '2' for Products.";
+                        reply = "English selected!\n1. Courses Menu\n2. Products Menu";
                     } else if (text === '2' || text.includes('guj')) {
                         userSessions[from] = 'guj';
-                        reply = "ગુજરાતી ભાષા પસંદ થઈ છે! કોર્સ માટે '1', પ્રોડક્ટ માટે '2' લખો.";
+                        reply = "ગુજરાતી ભાષા પસંદ થઈ છે!\n1. કોર્સ મેનૂ\n2. પ્રોડક્ટ્સ મેનૂ";
                     } else {
-                        reply = "Please select language:\n1. English\n2. ગુજરાતી";
+                        reply = "Please select language / ભાષા પસંદ કરો:\n1. English\n2. ગુજરાતી";
                     }
                 } 
                 else if (userSessions[from] === 'eng') {
@@ -68,17 +100,19 @@ app.post('/webhook', (req, res) => {
                     } else if (text === '2') {
                         reply = "ગુજરાતી પ્રોડક્ટ્સ:\n- લેપટોપ અને ડેસ્કટોપ";
                     } else {
-                        reply = "અમાન્ય વિકલ્પ. ફરી શરૂ કરવા 'start' લખો.";
+                        reply = "અમાન્ય વિકલ્પ. ફરી શરૂ કરવા માટે 'start' લખો.";
                     }
                 }
 
-                console.log(`Reply sent: ${reply}`);
+                if (reply) {
+                    await sendWhatsAppMessage(from, reply, phoneNumberId);
+                }
             }
             return res.status(200).send('EVENT_RECEIVED');
         }
         return res.sendStatus(404);
     } catch (err) {
-        console.error("Error:", err);
+        console.error("Webhook processing error:", err);
         return res.status(500).send('Server Error Handled');
     }
 });
