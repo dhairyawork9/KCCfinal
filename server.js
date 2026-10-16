@@ -13,7 +13,7 @@ let userSessions = {};
 // DATA-DRIVEN RECURSIVE SHOP CONFIGURATION
 /* BOT_CONFIG_START */
 const BOT_CONFIG = {
-  "welcomeText": "WELCOME TO KAUSHALYA COMPUTER CENTRE! \nPlease select your language :\n\nકૌશલ્યા કોમ્પ્યુટર સેન્ટરમાં સ્વાગત છે!\nભાષા પસંદ કરો:\n\n1. English (ENG)\n2. ગુજરાતી (GUJ)",
+  "welcomeText": "WELCOME TO KAUSHALYA COMPUTER CENTRE! / કૌશલ્યા કોમ્પ્યુટર સેન્ટરમાં સ્વાગત છે!\nPlease select your language / ભાષા પસંદ કરો:\n1. English (ENG)\n2. ગુજરાતી (GUJ)",
   "tree": {
     "1": {
       "title": "English",
@@ -31,13 +31,7 @@ const BOT_CONFIG = {
             "2": {
               "title": "Basic Office",
               "prompt": "Basic Computer Course:\n- Word, Excel, PowerPoint, Gujarati Typing\n- Duration: 2 Months\nFee: ₹2,500\n\nReply '0' for back, '00' for main menu, 'stop' to exit.",
-              "children": {
-                "1": {
-                  "title": "New Sub-item 1",
-                  "prompt": "Details for item 1.\n\nReply '0' for back, '00' for main menu, 'stop' to exit.",
-                  "children": {}
-                }
-              }
+              "children": {}
             }
           }
         },
@@ -60,11 +54,6 @@ const BOT_CONFIG = {
         "3": {
           "title": "Repairs & Service",
           "prompt": "Service & Support:\n- Windows OS Installation\n- Printer Cartridge Refill\n- Motherboard Repair\nVisit Shop or Call us directly!\n\nReply '0' for back, '00' for main menu, 'stop' to exit.",
-          "children": {}
-        },
-        "4": {
-          "title": "New Sub-item 4",
-          "prompt": "Details for item 4.\n\nReply '0' for back, '00' for main menu, 'stop' to exit.",
           "children": {}
         }
       }
