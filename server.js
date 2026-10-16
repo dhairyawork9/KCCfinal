@@ -1,41 +1,44 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const axios = require('axios');
 const app = express();
 
 app.use(bodyParser.json());
 
-// Token & ID configurations (from Vercel Environment Variables or fallbacks)
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; 
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
 let userSessions = {};
 
-// Helper function to send outbound WhatsApp messages via Meta Graph API
+// Helper function using native fetch (No axios needed)
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
     if (!WHATSAPP_TOKEN) {
         console.error("Missing WHATSAPP_TOKEN in Environment Variables.");
         return;
     }
     try {
-        await axios({
+        const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
             method: 'POST',
-            url: `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
             headers: {
                 'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
                 'Content-Type': 'application/json'
             },
-            data: {
+            body: JSON.stringify({
                 messaging_product: 'whatsapp',
                 recipient_type: 'individual',
                 to: to,
                 type: 'text',
                 text: { body: textBody }
-            }
+            })
         });
-        console.log(`Outbound message delivered to ${to}`);
+
+        const data = await response.json();
+        if (!response.ok) {
+            console.error('Meta API Error:', JSON.stringify(data));
+        } else {
+            console.log(`Outbound message delivered to ${to}`);
+        }
     } catch (error) {
-        console.error('Error sending WhatsApp message:', error.response ? error.response.data : error.message);
+        console.error('Network error sending WhatsApp message:', error.message);
     }
 }
 
@@ -54,6 +57,11 @@ app.get('/webhook', (req, res) => {
         }
     }
     return res.status(200).send('KCC Webhook Endpoint Active');
+});
+
+// Root fallback
+app.get('/', (req, res) => {
+    res.status(200).send('KCC WhatsApp Bot Server is Running');
 });
 
 // 2. WhatsApp Message Handler
