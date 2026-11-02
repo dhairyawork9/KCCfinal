@@ -142,6 +142,12 @@ app.post('/webhook', async (req, res) => {
 
             if (messaging && phoneNumberId && messaging.type === 'text') {
                 let from = messaging.from;
+              let from = messaging.from;
+
+                // If a human shop owner paused this session, do not let the bot reply
+                if (userSessions[from] && userSessions[from].paused) {
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
 
                 // Never reply to messages originating from the business number itself
                 if (from === phoneNumberId) {
@@ -151,7 +157,7 @@ app.post('/webhook', async (req, res) => {
                 let reply = "";
 
                 if (text === 'start') {
-                    userSessions[from] = { path: [] };
+                    userSessions[from] = { path: [], paused: false }; // Added paused flag for coexistence
                     reply = BOT_CONFIG.welcomeText;
                 } else if (text === 'stop' || text === 'exit') {
                     delete userSessions[from];
