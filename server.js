@@ -131,11 +131,22 @@ app.post('/webhook', async (req, res) => {
         let body = req.body;
         if (body && body.object) {
             let entry = body.entry?.[0]?.changes?.[0]?.value;
+            
+            // Ignore business app message echoes for coexistence
+            if (entry?.message_echoes) {
+                return res.status(200).send('EVENT_RECEIVED');
+            }
+
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
 
             if (messaging && phoneNumberId && messaging.type === 'text') {
                 let from = messaging.from;
+
+                // Never reply to messages originating from the business number itself
+                if (from === phoneNumberId) {
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
                 let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
                 let reply = "";
 
