@@ -7,7 +7,24 @@ app.use(bodyParser.json());
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
+// Session storage with automatic cleanup for inactive users (2-hour TTL)
 let userSessions = {};
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; 
+
+function getOrCreateSession(from) {
+    let now = Date.now();
+    if (userSessions[from]) {
+        // Check if session expired
+        if (now - userSessions[from].lastActive > SESSION_TTL_MS) {
+            userSessions[from] = { path: [], paused: false, lastActive: now };
+        } else {
+            userSessions[from].lastActive = now;
+        }
+    } else {
+        userSessions[from] = { path: [], paused: false, lastActive: now };
+    }
+    return userSessions[from];
+}
 
 // DATA-DRIVEN SHOP CONFIGURATION (Lightweight JSON Tree)
 /* BOT_CONFIG_START */
