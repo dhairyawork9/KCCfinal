@@ -16,13 +16,14 @@ const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v26.0";
 
 // In-Memory Storage (Note: Resets on Vercel cold starts)
 let userSessions = {};
-let processedMessages = new Set();
-let optedOutUsers = new Set();
+let processedMessages = new Set(); // For Deduplication
+let optedOutUsers = new Set();     // For Persistent STOP Opt-Out
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; 
 
 function getOrCreateSession(from) {
     let now = Date.now();
     if (userSessions[from]) {
+        // Check if session expired
         if (now - userSessions[from].lastActive > SESSION_TTL_MS) {
             userSessions[from] = { path: [], paused: false, lastActive: now };
         } else {
@@ -108,6 +109,7 @@ const BOT_CONFIG = {
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
     if (!WHATSAPP_TOKEN) return;
     try {
+        // FIX: Upgraded to dynamic Graph API variable (v26.0)
         await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`, {
             method: 'POST',
             headers: {
@@ -138,8 +140,23 @@ function resolvePath(tree, path) {
     return { node: lastNode, children: currentMap || {} };
 }
 
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
+        return res.status(200).send(challenge);
+    }
+    return res.status(200).send('KCC WhatsApp Shop Engine Active');
+});
+
+app.get('/', (req, res) => {
+    res.status(200).send('KCC WhatsApp Bot Engine is Active');
+});
+
 function verifyMetaSignature(req, res, next) {
-    // Strict production security: fail closed if APP_SECRET is missing
+    // FIX 1: Strict production security: fail closed if APP_SECRET is missing
     if (!APP_SECRET) {
         return res.status(500).send('Server configuration error: APP_SECRET missing');
     }
@@ -169,42 +186,26 @@ function verifyMetaSignature(req, res, next) {
     next();
 }
 
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
-        return res.status(200).send(challenge);
-    }
-    return res.status(200).send('KCC WhatsApp Shop Engine Active');
-});
-
-app.get('/', (req, res) => {
-    res.status(200).send('KCC WhatsApp Bot Engine is Active');
-});
-
 app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
         let body = req.body;
         if (body && body.object) {
-            
-            // AUTOMATIC COEXISTENCE: Official Meta smb_message_echoes / message_echoes handling
             let changeItem = body.entry?.[0]?.changes?.[0];
-            if (changeItem?.field === 'smb_message_echoes' || changeItem?.value?.message_echoes) {
-                let echoValue = changeItem.value;
-                let echoes = echoValue?.message_echoes || (echoValue ? [echoValue] : []);
+            let entry = changeItem?.value;
+            
+            // FIX 2: Official Meta smb_message_echoes / message_echoes handling
+            if (changeItem?.field === 'smb_message_echoes' || entry?.message_echoes) {
+                let echoes = entry?.message_echoes || (entry ? [entry] : []);
                 for (let echoMsg of echoes) {
                     let customerPhone = echoMsg?.to || echoMsg?.recipient_id;
                     if (customerPhone) {
                         let session = getOrCreateSession(customerPhone);
-                        session.paused = true; // Automatically pause bot when shop owner replies manually
+                        session.paused = true; // Auto-pause bot for human takeover
                     }
                 }
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
-            let entry = changeItem?.value;
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
 
@@ -214,7 +215,7 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
                 let msgId = messaging.id;
                 if (msgId) {
                     if (processedMessages.has(msgId)) {
-                        return res.status(200).send('EVENT_RECEIVED'); // Skip duplicate
+                        return res.status(200).send('EVENT_RECEIVED'); 
                     }
                     processedMessages.add(msgId);
                     if (processedMessages.size > 1000) {
@@ -224,15 +225,15 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
                 }
 
                 let from = messaging.from;
-                
+
                 // Never reply if message is from the business number itself
                 if (from === phoneNumberId || from === entry?.metadata?.display_phone_number) {
                     return res.status(200).send('EVENT_RECEIVED');
                 }
 
                 let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
-                
-                // Persistent OPT-OUT (STOP / EXIT)
+
+                // FIX 3: Persistent OPT-OUT (STOP / EXIT)
                 if (text === 'stop' || text === 'exit') {
                     optedOutUsers.add(from);
                     delete userSessions[from];
@@ -240,9 +241,9 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
                     return res.status(200).send('EVENT_RECEIVED');
                 } else if (optedOutUsers.has(from)) {
                     if (text === 'start') {
-                        optedOutUsers.delete(from); // Allow user to opt back in
+                        optedOutUsers.delete(from); // Opt back in
                     } else {
-                        return res.status(200).send('EVENT_RECEIVED'); // Permanently ignore opted-out users
+                        return res.status(200).send('EVENT_RECEIVED'); // Ignore opted-out users
                     }
                 }
 
