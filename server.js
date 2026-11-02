@@ -129,13 +129,22 @@ app.get('/', (req, res) => {
 app.post('/webhook', async (req, res) => {
     try {
         let body = req.body;
-        if (body && body.object) {
-            let entry = body.entry?.[0]?.changes?.[0]?.value;
-            
-            // Ignore business app message echoes for coexistence
-            if (entry?.message_echoes) {
-                return res.status(200).send('EVENT_RECEIVED');
-            }
+            if (body && body.object) {
+                let entry = body.entry?.[0]?.changes?.[0]?.value;
+                
+                // AUTOMATIC COEXISTENCE: If the shop owner replies from the WhatsApp Business App, 
+                // Meta sends a message_echo. We capture it and pause the bot for that customer.
+                if (entry?.message_echoes) {
+                    let echoMsg = entry.message_echoes[0];
+                    let customerPhone = echoMsg?.to;
+                    if (customerPhone) {
+                        if (!userSessions[customerPhone]) {
+                            userSessions[customerPhone] = { path: [] };
+                        }
+                        userSessions[customerPhone].paused = true; // Auto-pause bot so human can chat
+                    }
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
 
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
