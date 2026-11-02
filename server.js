@@ -1,8 +1,13 @@
 const express = require('express');
-const bodyParser = require('body-parser');
+const crypto = require('crypto');
 const app = express();
 
-app.use(bodyParser.json());
+// Capture raw body bytes for Meta X-Hub-Signature-256 verification
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -143,7 +148,38 @@ app.get('/', (req, res) => {
     res.status(200).send('KCC WhatsApp Bot Engine is Active');
 });
 
-app.post('/webhook', async (req, res) => {
+const APP_SECRET = process.env.APP_SECRET;
+
+function verifyMetaSignature(req, res, next) {
+    // If APP_SECRET is not configured yet, bypass (safe fallback during development)
+    if (!APP_SECRET) return next();
+
+    const signature = req.headers['x-hub-signature-256'];
+    if (!signature) {
+        return res.status(401).send('Missing signature');
+    }
+
+    const expectedHash = 'sha256=' + crypto
+        .createHmac('sha256', APP_SECRET)
+        .update(req.rawBody || '')
+        .digest('hex');
+
+    try {
+        const isValid = crypto.timingSafeEqual(
+            Buffer.from(signature),
+            Buffer.from(expectedHash)
+        );
+        if (!isValid) {
+            return res.status(401).send('Invalid signature');
+        }
+    } catch (e) {
+        return res.status(401).send('Signature verification failed');
+    }
+
+    next();
+}
+
+app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
         let body = req.body;
             if (body && body.object) {
