@@ -11,15 +11,18 @@ app.use(express.json({
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const APP_SECRET = process.env.APP_SECRET;
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v26.0";
 
-// Session storage with automatic cleanup for inactive users (2-hour TTL)
+// In-Memory Storage (Note: Resets on Vercel cold starts)
 let userSessions = {};
+let processedMessages = new Set();
+let optedOutUsers = new Set();
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; 
 
 function getOrCreateSession(from) {
     let now = Date.now();
     if (userSessions[from]) {
-        // Check if session expired
         if (now - userSessions[from].lastActive > SESSION_TTL_MS) {
             userSessions[from] = { path: [], paused: false, lastActive: now };
         } else {
@@ -105,7 +108,7 @@ const BOT_CONFIG = {
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
     if (!WHATSAPP_TOKEN) return;
     try {
-        await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+        await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -119,7 +122,9 @@ async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
                 text: { body: textBody }
             })
         });
-    } catch (error) {}
+    } catch (error) {
+        console.error("Message send error:", error);
+    }
 }
 
 function resolvePath(tree, path) {
@@ -133,26 +138,11 @@ function resolvePath(tree, path) {
     return { node: lastNode, children: currentMap || {} };
 }
 
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
-        return res.status(200).send(challenge);
-    }
-    return res.status(200).send('KCC WhatsApp Shop Engine Active');
-});
-
-app.get('/', (req, res) => {
-    res.status(200).send('KCC WhatsApp Bot Engine is Active');
-});
-
-const APP_SECRET = process.env.APP_SECRET;
-
 function verifyMetaSignature(req, res, next) {
-    // If APP_SECRET is not configured yet, bypass (safe fallback during development)
-    if (!APP_SECRET) return next();
+    // Strict production security: fail closed if APP_SECRET is missing
+    if (!APP_SECRET) {
+        return res.status(500).send('Server configuration error: APP_SECRET missing');
+    }
 
     const signature = req.headers['x-hub-signature-256'];
     if (!signature) {
@@ -179,63 +169,115 @@ function verifyMetaSignature(req, res, next) {
     next();
 }
 
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
+        return res.status(200).send(challenge);
+    }
+    return res.status(200).send('KCC WhatsApp Shop Engine Active');
+});
+
+app.get('/', (req, res) => {
+    res.status(200).send('KCC WhatsApp Bot Engine is Active');
+});
+
 app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
         let body = req.body;
-            if (body && body.object) {
-                let entry = body.entry?.[0]?.changes?.[0]?.value;
-                
-                // AUTOMATIC COEXISTENCE: Handle Meta smb_message_echoes & message_echoes safely
-                let changeField = body.entry?.[0]?.changes?.[0]?.field;
-                if (changeField === 'smb_message_echoes' || entry?.message_echoes) {
-                    let echoes = entry?.message_echoes || [];
-                    for (let echoMsg of echoes) {
-                        let customerPhone = echoMsg?.to;
-                        if (customerPhone) {
-                            if (!userSessions[customerPhone]) {
-                                userSessions[customerPhone] = { path: [], paused: false };
-                            }
-                            userSessions[customerPhone].paused = true; // Auto-pause bot for human takeover
-                        }
+        if (body && body.object) {
+            
+            // AUTOMATIC COEXISTENCE: Official Meta smb_message_echoes / message_echoes handling
+            let changeItem = body.entry?.[0]?.changes?.[0];
+            if (changeItem?.field === 'smb_message_echoes' || changeItem?.value?.message_echoes) {
+                let echoValue = changeItem.value;
+                let echoes = echoValue?.message_echoes || (echoValue ? [echoValue] : []);
+                for (let echoMsg of echoes) {
+                    let customerPhone = echoMsg?.to || echoMsg?.recipient_id;
+                    if (customerPhone) {
+                        let session = getOrCreateSession(customerPhone);
+                        session.paused = true; // Automatically pause bot when shop owner replies manually
                     }
-                    return res.status(200).send('EVENT_RECEIVED');
                 }
+                return res.status(200).send('EVENT_RECEIVED');
+            }
 
+            let entry = changeItem?.value;
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
 
-           if (messaging && phoneNumberId && messaging.type === 'text') {
-                let from = messaging.from;
+            if (messaging && phoneNumberId && messaging.type === 'text') {
+                
+                // Duplicate message protection
+                let msgId = messaging.id;
+                if (msgId) {
+                    if (processedMessages.has(msgId)) {
+                        return res.status(200).send('EVENT_RECEIVED'); // Skip duplicate
+                    }
+                    processedMessages.add(msgId);
+                    if (processedMessages.size > 1000) {
+                        let firstItem = processedMessages.values().next().value;
+                        processedMessages.delete(firstItem);
+                    }
+                }
 
-                // If a human shop owner paused this session, do not let the bot reply
-                if (userSessions[from] && userSessions[from].paused) {
+                let from = messaging.from;
+                
+                // Never reply if message is from the business number itself
+                if (from === phoneNumberId || from === entry?.metadata?.display_phone_number) {
                     return res.status(200).send('EVENT_RECEIVED');
                 }
 
                 let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
+                
+                // Persistent OPT-OUT (STOP / EXIT)
+                if (text === 'stop' || text === 'exit') {
+                    optedOutUsers.add(from);
+                    delete userSessions[from];
+                    await sendWhatsAppMessage(from, "🛑 You have been successfully unsubscribed. You will no longer receive automated messages from this bot. Reply 'START' anytime to opt back in.", phoneNumberId);
+                    return res.status(200).send('EVENT_RECEIVED');
+                } else if (optedOutUsers.has(from)) {
+                    if (text === 'start') {
+                        optedOutUsers.delete(from); // Allow user to opt back in
+                    } else {
+                        return res.status(200).send('EVENT_RECEIVED'); // Permanently ignore opted-out users
+                    }
+                }
+
+                // Keyword Coexistence Trigger
+                if (text === 'agent' || text === 'human' || text === 'support') {
+                    let session = getOrCreateSession(from);
+                    session.paused = true;
+                    await sendWhatsAppMessage(from, "👨‍💻 *Connected to Human Support.*\nOur team has been notified and will reply to you shortly.", phoneNumberId);
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
+
+                // Check paused state
+                let session = getOrCreateSession(from);
+                if (session.paused) {
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
+
                 let reply = "";
 
                 if (text === 'start') {
-                    userSessions[from] = { path: [], paused: false }; // Added paused flag for coexistence
+                    session.path = [];
                     reply = BOT_CONFIG.welcomeText;
-                } else if (text === 'stop' || text === 'exit') {
-                    delete userSessions[from];
-                    return res.status(200).send('EVENT_RECEIVED');
-                } else if (!userSessions[from]) {
-                    return res.status(200).send('EVENT_RECEIVED');
                 } else {
-                    let currentPath = userSessions[from].path;
+                    let currentPath = session.path;
                     if (text === '00' || text === 'menu') {
                         if (currentPath.length > 0) {
-                            userSessions[from].path = [currentPath[0]];
-                            reply = resolvePath(BOT_CONFIG.tree, userSessions[from].path).node?.prompt || BOT_CONFIG.welcomeText;
+                            session.path = [currentPath[0]];
+                            reply = resolvePath(BOT_CONFIG.tree, session.path).node?.prompt || BOT_CONFIG.welcomeText;
                         } else { reply = BOT_CONFIG.welcomeText; }
                     } else if (text === '0' || text === 'back') {
                         if (currentPath.length > 1) {
                             currentPath.pop();
                             reply = resolvePath(BOT_CONFIG.tree, currentPath).node?.prompt || BOT_CONFIG.welcomeText;
                         } else {
-                            userSessions[from].path = [];
+                            session.path = [];
                             reply = BOT_CONFIG.welcomeText;
                         }
                     } else {
@@ -254,12 +296,14 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
                         }
                     }
                 }
+                
                 if (reply) await sendWhatsAppMessage(from, reply, phoneNumberId);
             }
             return res.status(200).send('EVENT_RECEIVED');
         }
         return res.sendStatus(404);
     } catch (err) {
+        console.error("Webhook error:", err);
         return res.status(500).send('Server Error');
     }
 });
