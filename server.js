@@ -140,19 +140,14 @@ app.post('/webhook', async (req, res) => {
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
 
-            if (messaging && phoneNumberId && messaging.type === 'text') {
+           if (messaging && phoneNumberId && messaging.type === 'text') {
                 let from = messaging.from;
-              let from = messaging.from;
 
                 // If a human shop owner paused this session, do not let the bot reply
                 if (userSessions[from] && userSessions[from].paused) {
                     return res.status(200).send('EVENT_RECEIVED');
                 }
 
-                // Never reply to messages originating from the business number itself
-                if (from === phoneNumberId) {
-                    return res.status(200).send('EVENT_RECEIVED');
-                }
                 let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
                 let reply = "";
 
