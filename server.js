@@ -13,40 +13,80 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'smartbiz_secure_token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const APP_SECRET = process.env.APP_SECRET;
 
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
-const userSessions = new Map();
+// Upstash Redis: configure both variables in Vercel.
+const SESSION_TTL_SECONDS = 2 * 60 * 60;
+const MESSAGE_ID_TTL_SECONDS = 24 * 60 * 60;
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// Best-effort duplicate protection per running instance.
-// For guaranteed deduplication across Vercel instances, use persistent storage.
-const seenMessageIds = new Map();
-const MESSAGE_ID_TTL_MS = 24 * 60 * 60 * 1000;
-
-function cleanExpiredData() {
-    const now = Date.now();
-
-    for (const [phone, session] of userSessions) {
-        if (now - session.lastActive > SESSION_TTL_MS) {
-            userSessions.delete(phone);
-        }
+async function redisCommand(...args) {
+    if (!REDIS_URL || !REDIS_TOKEN) {
+        throw new Error('Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN');
     }
 
-    for (const [id, timestamp] of seenMessageIds) {
-        if (now - timestamp > MESSAGE_ID_TTL_MS) {
-            seenMessageIds.delete(id);
-        }
+    const response = await fetch(REDIS_URL, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${REDIS_TOKEN}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(args)
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+        throw new Error(data.error || `Upstash request failed (${response.status})`);
+    }
+
+    return data.result;
+}
+
+function sessionKey(phone) {
+    return `kcc:session:${phone}`;
+}
+
+async function getSession(phone) {
+    const result = await redisCommand('GET', sessionKey(phone));
+    if (!result) return null;
+
+    try {
+        return JSON.parse(result);
+    } catch {
+        await redisCommand('DEL', sessionKey(phone));
+        return null;
     }
 }
 
-function wasAlreadyHandled(messageId) {
+async function saveSession(phone, session) {
+    session.lastActive = Date.now();
+
+    await redisCommand(
+        'SET',
+        sessionKey(phone),
+        JSON.stringify(session),
+        'EX',
+        SESSION_TTL_SECONDS
+    );
+}
+
+async function deleteSession(phone) {
+    await redisCommand('DEL', sessionKey(phone));
+}
+
+async function wasAlreadyHandled(messageId) {
     if (!messageId) return false;
 
-    const now = Date.now();
-    const previous = seenMessageIds.get(messageId);
+    const result = await redisCommand(
+        'SET',
+        `kcc:seen:${messageId}`,
+        '1',
+        'NX',
+        'EX',
+        MESSAGE_ID_TTL_SECONDS
+    );
 
-    if (previous && now - previous < MESSAGE_ID_TTL_MS) return true;
-
-    seenMessageIds.set(messageId, now);
-    return false;
+    return result !== 'OK';
 }
 
 // DATA-DRIVEN SHOP CONFIGURATION (Lightweight JSON Tree)
@@ -175,32 +215,30 @@ function normalizeText(value) {
     return String(value || '').trim().toLowerCase();
 }
 
-function pauseForHuman(customerPhone) {
+async function pauseForHuman(customerPhone) {
     if (!customerPhone) return;
 
-    const session = userSessions.get(customerPhone) || {
+    const session = await getSession(customerPhone) || {
         path: [],
         paused: false,
         lastActive: Date.now()
     };
 
     session.paused = true;
-    session.lastActive = Date.now();
-    userSessions.set(customerPhone, session);
+    await saveSession(customerPhone, session);
 }
 
-function getIncomingMessages(body) {
+async function getIncomingMessages(body) {
     const messages = [];
 
     for (const entry of body?.entry || []) {
         for (const change of entry?.changes || []) {
             const value = change?.value;
 
-            // Coexistence: messages sent by the business app are echoes.
+            // Coexistence: a business-app echo means a person is replying.
             if (change?.field === 'smb_message_echoes' || value?.message_echoes) {
                 for (const echo of value?.message_echoes || []) {
-                    // In a business-app echo, "to" is the customer.
-                    if (echo?.to) pauseForHuman(echo.to);
+                    if (echo?.to) await pauseForHuman(echo.to);
                 }
             }
 
@@ -217,8 +255,13 @@ function getIncomingMessages(body) {
 }
 
 function verifyMetaSignature(req, res, next) {
-    // Keep local development possible; configure APP_SECRET in production.
-    if (!APP_SECRET) return next();
+    // Signature verification must be enabled in production.
+    if (!APP_SECRET) {
+        if (process.env.NODE_ENV === 'production') {
+            return res.status(500).send('APP_SECRET is not configured');
+        }
+        return next();
+    }
 
     const signature = req.headers['x-hub-signature-256'];
     if (typeof signature !== 'string' || !req.rawBody) {
@@ -267,40 +310,42 @@ async function processTextMessage(message, phoneNumberId) {
     const from = message.from;
     const messageId = message.id;
 
-    if (wasAlreadyHandled(messageId)) return;
+    if (await wasAlreadyHandled(messageId)) return;
 
     const text = normalizeText(message.text?.body).replace(/[.!?]+$/g, '');
 
-    // Explicit STOP always stops. START explicitly reactivates, regardless of pause state.
+    // STOP/EXIT ends the bot session. START explicitly reactivates it.
     if (text === 'stop' || text === 'exit') {
-        userSessions.delete(from);
+        await deleteSession(from);
         return;
     }
 
     if (text === 'start') {
-        userSessions.set(from, {
+        await saveSession(from, {
             path: [],
             paused: false,
             lastActive: Date.now()
         });
+
         await sendWhatsAppMessage(from, BOT_CONFIG.welcomeText, phoneNumberId);
         return;
     }
 
-    const existingSession = userSessions.get(from);
+    const existingSession = await getSession(from);
 
-    // No active session, human takeover pause, or expired session: remain silent.
+    // No session, human takeover pause, or expired session: remain silent.
     if (
         !existingSession ||
         existingSession.paused ||
-        Date.now() - existingSession.lastActive > SESSION_TTL_MS
+        Date.now() - existingSession.lastActive > SESSION_TTL_SECONDS * 1000
     ) {
-        userSessions.delete(from);
+        await deleteSession(from);
         return;
     }
 
-    existingSession.lastActive = Date.now();
-    const currentPath = existingSession.path;
+    const currentPath = Array.isArray(existingSession.path)
+        ? existingSession.path
+        : [];
     let reply = '';
 
     if (text === '00' || text === 'menu') {
@@ -314,6 +359,7 @@ async function processTextMessage(message, phoneNumberId) {
     } else if (text === '0' || text === 'back') {
         if (currentPath.length > 1) {
             currentPath.pop();
+            existingSession.path = currentPath;
             reply = resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt
                 || BOT_CONFIG.welcomeText;
         } else {
@@ -333,14 +379,19 @@ async function processTextMessage(message, phoneNumberId) {
         }
 
         if (Object.prototype.hasOwnProperty.call(targetMap, chosenKey)) {
-            currentPath.push(chosenKey);
-            reply = resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt || 'Selected.';
+            existingSession.path = [...currentPath, chosenKey];
+            reply = resolvePath(BOT_CONFIG.tree, existingSession.path)?.node?.prompt
+                || 'Selected.';
         } else {
-            // Any unexpected message ends this bot session immediately and silently.
-            userSessions.delete(from);
-            return;
+            // Keep the session active and show the current menu again for an invalid choice.
+            reply = currentPath.length > 0
+                ? resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt
+                    || BOT_CONFIG.welcomeText
+                : BOT_CONFIG.welcomeText;
         }
     }
+
+    await saveSession(from, existingSession);
 
     if (reply) {
         await sendWhatsAppMessage(from, reply, phoneNumberId);
@@ -353,9 +404,7 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
             return res.sendStatus(200);
         }
 
-        cleanExpiredData();
-
-        const messages = getIncomingMessages(req.body);
+        const messages = await getIncomingMessages(req.body);
 
         for (const item of messages) {
             await processTextMessage(item.message, item.phoneNumberId);
@@ -366,8 +415,8 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
     } catch (error) {
         console.error('Webhook processing error:', error.message);
 
-        // Acknowledge errors so Meta does not repeatedly deliver a failing event.
-        return res.status(200).send('EVENT_RECEIVED');
+        // A non-2xx response allows Meta to retry transient storage failures.
+        return res.status(500).send('Webhook processing failed');
     }
 });
 
