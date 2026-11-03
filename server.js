@@ -2,33 +2,51 @@ const express = require('express');
 const crypto = require('crypto');
 const app = express();
 
-// Capture raw body bytes for Meta X-Hub-Signature-256 verification
 app.use(express.json({
     verify: (req, res, buf) => {
         req.rawBody = buf;
     }
 }));
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
+// Set these in Vercel Environment Variables.
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'smartbiz_secure_token';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const APP_SECRET = process.env.APP_SECRET;
 
-// Session storage with automatic cleanup for inactive users (2-hour TTL)
-let userSessions = {};
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000; 
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const userSessions = new Map();
 
-function getOrCreateSession(from) {
-    let now = Date.now();
-    if (userSessions[from]) {
-        // Check if session expired
-        if (now - userSessions[from].lastActive > SESSION_TTL_MS) {
-            userSessions[from] = { path: [], paused: false, lastActive: now };
-        } else {
-            userSessions[from].lastActive = now;
+// Best-effort duplicate protection per running instance.
+// For guaranteed deduplication across Vercel instances, use persistent storage.
+const seenMessageIds = new Map();
+const MESSAGE_ID_TTL_MS = 24 * 60 * 60 * 1000;
+
+function cleanExpiredData() {
+    const now = Date.now();
+
+    for (const [phone, session] of userSessions) {
+        if (now - session.lastActive > SESSION_TTL_MS) {
+            userSessions.delete(phone);
         }
-    } else {
-        userSessions[from] = { path: [], paused: false, lastActive: now };
     }
-    return userSessions[from];
+
+    for (const [id, timestamp] of seenMessageIds) {
+        if (now - timestamp > MESSAGE_ID_TTL_MS) {
+            seenMessageIds.delete(id);
+        }
+    }
+}
+
+function wasAlreadyHandled(messageId) {
+    if (!messageId) return false;
+
+    const now = Date.now();
+    const previous = seenMessageIds.get(messageId);
+
+    if (previous && now - previous < MESSAGE_ID_TTL_MS) return true;
+
+    seenMessageIds.set(messageId, now);
+    return false;
 }
 
 // DATA-DRIVEN SHOP CONFIGURATION (Lightweight JSON Tree)
@@ -103,34 +121,126 @@ const BOT_CONFIG = {
 /* BOT_CONFIG_END */
 
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
-    if (!WHATSAPP_TOKEN) return;
+    if (!WHATSAPP_TOKEN || !phoneNumberId || !to || !textBody) {
+        return false;
+    }
+
     try {
-        await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                messaging_product: 'whatsapp',
-                recipient_type: 'individual',
-                to: to,
-                type: 'text',
-                text: { body: textBody }
-            })
-        });
-    } catch (error) {}
+        const response = await fetch(
+            `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to,
+                    type: 'text',
+                    text: { body: textBody }
+                })
+            }
+        );
+
+        // A failed Meta response is handled locally; do not throw and trigger webhook retries.
+        if (!response.ok) {
+            const errorBody = await response.text().catch(() => '');
+            console.error('WhatsApp send failed:', response.status, errorBody.slice(0, 500));
+            return false;
+        }
+
+        return true;
+    } catch (error) {
+        console.error('WhatsApp send error:', error.message);
+        return false;
+    }
 }
 
 function resolvePath(tree, path) {
     let currentMap = tree;
     let lastNode = null;
+
     for (const step of path) {
         if (!currentMap || !currentMap[step]) return null;
         lastNode = currentMap[step];
         currentMap = lastNode.children;
     }
+
     return { node: lastNode, children: currentMap || {} };
+}
+
+function normalizeText(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function pauseForHuman(customerPhone) {
+    if (!customerPhone) return;
+
+    const session = userSessions.get(customerPhone) || {
+        path: [],
+        paused: false,
+        lastActive: Date.now()
+    };
+
+    session.paused = true;
+    session.lastActive = Date.now();
+    userSessions.set(customerPhone, session);
+}
+
+function getIncomingMessages(body) {
+    const messages = [];
+
+    for (const entry of body?.entry || []) {
+        for (const change of entry?.changes || []) {
+            const value = change?.value;
+
+            // Coexistence: messages sent by the business app are echoes.
+            if (change?.field === 'smb_message_echoes' || value?.message_echoes) {
+                for (const echo of value?.message_echoes || []) {
+                    // In a business-app echo, "to" is the customer.
+                    if (echo?.to) pauseForHuman(echo.to);
+                }
+            }
+
+            for (const message of value?.messages || []) {
+                messages.push({
+                    message,
+                    phoneNumberId: value?.metadata?.phone_number_id
+                });
+            }
+        }
+    }
+
+    return messages;
+}
+
+function verifyMetaSignature(req, res, next) {
+    // Keep local development possible; configure APP_SECRET in production.
+    if (!APP_SECRET) return next();
+
+    const signature = req.headers['x-hub-signature-256'];
+    if (typeof signature !== 'string' || !req.rawBody) {
+        return res.status(401).send('Missing signature');
+    }
+
+    const expected = 'sha256=' + crypto
+        .createHmac('sha256', APP_SECRET)
+        .update(req.rawBody)
+        .digest('hex');
+
+    const actualBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+
+    if (
+        actualBuffer.length !== expectedBuffer.length ||
+        !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+    ) {
+        return res.status(401).send('Invalid signature');
+    }
+
+    next();
 }
 
 app.get('/webhook', (req, res) => {
@@ -138,129 +248,126 @@ app.get('/webhook', (req, res) => {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
-    if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN && challenge) {
         return res.status(200).send(challenge);
     }
-    return res.status(200).send('KCC WhatsApp Shop Engine Active');
+
+    return res.sendStatus(403);
 });
 
 app.get('/', (req, res) => {
     res.status(200).send('KCC WhatsApp Bot Engine is Active');
 });
 
-const APP_SECRET = process.env.APP_SECRET;
-
-function verifyMetaSignature(req, res, next) {
-    // If APP_SECRET is not configured yet, bypass (safe fallback during development)
-    if (!APP_SECRET) return next();
-
-    const signature = req.headers['x-hub-signature-256'];
-    if (!signature) {
-        return res.status(401).send('Missing signature');
+async function processTextMessage(message, phoneNumberId) {
+    if (!message || message.type !== 'text' || !phoneNumberId || !message.from) {
+        return;
     }
 
-    const expectedHash = 'sha256=' + crypto
-        .createHmac('sha256', APP_SECRET)
-        .update(req.rawBody || '')
-        .digest('hex');
+    const from = message.from;
+    const messageId = message.id;
 
-    try {
-        const isValid = crypto.timingSafeEqual(
-            Buffer.from(signature),
-            Buffer.from(expectedHash)
-        );
-        if (!isValid) {
-            return res.status(401).send('Invalid signature');
+    if (wasAlreadyHandled(messageId)) return;
+
+    const text = normalizeText(message.text?.body).replace(/[.!?]+$/g, '');
+
+    // Explicit STOP always stops. START explicitly reactivates, regardless of pause state.
+    if (text === 'stop' || text === 'exit') {
+        userSessions.delete(from);
+        return;
+    }
+
+    if (text === 'start') {
+        userSessions.set(from, {
+            path: [],
+            paused: false,
+            lastActive: Date.now()
+        });
+        await sendWhatsAppMessage(from, BOT_CONFIG.welcomeText, phoneNumberId);
+        return;
+    }
+
+    const existingSession = userSessions.get(from);
+
+    // No active session, human takeover pause, or expired session: remain silent.
+    if (
+        !existingSession ||
+        existingSession.paused ||
+        Date.now() - existingSession.lastActive > SESSION_TTL_MS
+    ) {
+        userSessions.delete(from);
+        return;
+    }
+
+    existingSession.lastActive = Date.now();
+    const currentPath = existingSession.path;
+    let reply = '';
+
+    if (text === '00' || text === 'menu') {
+        if (currentPath.length > 0) {
+            existingSession.path = [currentPath[0]];
+            reply = resolvePath(BOT_CONFIG.tree, existingSession.path)?.node?.prompt
+                || BOT_CONFIG.welcomeText;
+        } else {
+            reply = BOT_CONFIG.welcomeText;
         }
-    } catch (e) {
-        return res.status(401).send('Signature verification failed');
+    } else if (text === '0' || text === 'back') {
+        if (currentPath.length > 1) {
+            currentPath.pop();
+            reply = resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt
+                || BOT_CONFIG.welcomeText;
+        } else {
+            existingSession.path = [];
+            reply = BOT_CONFIG.welcomeText;
+        }
+    } else {
+        const targetMap = currentPath.length === 0
+            ? BOT_CONFIG.tree
+            : (resolvePath(BOT_CONFIG.tree, currentPath)?.children || {});
+
+        let chosenKey = text;
+
+        if (currentPath.length === 0) {
+            if (text === 'eng' || text === 'english') chosenKey = '1';
+            if (text === 'guj' || text === 'ગુજરાતી') chosenKey = '2';
+        }
+
+        if (Object.prototype.hasOwnProperty.call(targetMap, chosenKey)) {
+            currentPath.push(chosenKey);
+            reply = resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt || 'Selected.';
+        } else {
+            // Any unexpected message ends this bot session immediately and silently.
+            userSessions.delete(from);
+            return;
+        }
     }
 
-    next();
+    if (reply) {
+        await sendWhatsAppMessage(from, reply, phoneNumberId);
+    }
 }
 
 app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
-        let body = req.body;
-            if (body && body.object) {
-                let entry = body.entry?.[0]?.changes?.[0]?.value;
-                
-                // AUTOMATIC COEXISTENCE: Handle Meta smb_message_echoes & message_echoes safely
-                let changeField = body.entry?.[0]?.changes?.[0]?.field;
-                if (changeField === 'smb_message_echoes' || entry?.message_echoes) {
-                    let echoes = entry?.message_echoes || [];
-                    for (let echoMsg of echoes) {
-                        let customerPhone = echoMsg?.to;
-                        if (customerPhone) {
-                            if (!userSessions[customerPhone]) {
-                                userSessions[customerPhone] = { path: [], paused: false };
-                            }
-                            userSessions[customerPhone].paused = true; // Auto-pause bot for human takeover
-                        }
-                    }
-                    return res.status(200).send('EVENT_RECEIVED');
-                }
-
-            let messaging = entry?.messages?.[0];
-            let phoneNumberId = entry?.metadata?.phone_number_id;
-
-           if (messaging && phoneNumberId && messaging.type === 'text') {
-                let from = messaging.from;
-
-                // If a human shop owner paused this session, do not let the bot reply
-                if (userSessions[from] && userSessions[from].paused) {
-                    return res.status(200).send('EVENT_RECEIVED');
-                }
-
-                let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
-                let reply = "";
-
-                if (text === 'start') {
-                    userSessions[from] = { path: [], paused: false }; // Added paused flag for coexistence
-                    reply = BOT_CONFIG.welcomeText;
-                } else if (text === 'stop' || text === 'exit') {
-                    delete userSessions[from];
-                    return res.status(200).send('EVENT_RECEIVED');
-                } else if (!userSessions[from]) {
-                    return res.status(200).send('EVENT_RECEIVED');
-                } else {
-                    let currentPath = userSessions[from].path;
-                    if (text === '00' || text === 'menu') {
-                        if (currentPath.length > 0) {
-                            userSessions[from].path = [currentPath[0]];
-                            reply = resolvePath(BOT_CONFIG.tree, userSessions[from].path).node?.prompt || BOT_CONFIG.welcomeText;
-                        } else { reply = BOT_CONFIG.welcomeText; }
-                    } else if (text === '0' || text === 'back') {
-                        if (currentPath.length > 1) {
-                            currentPath.pop();
-                            reply = resolvePath(BOT_CONFIG.tree, currentPath).node?.prompt || BOT_CONFIG.welcomeText;
-                        } else {
-                            userSessions[from].path = [];
-                            reply = BOT_CONFIG.welcomeText;
-                        }
-                    } else {
-                        let targetMap = currentPath.length === 0 ? BOT_CONFIG.tree : (resolvePath(BOT_CONFIG.tree, currentPath)?.children || {});
-                        let chosenKey = (currentPath.length === 0 && text.includes('eng')) ? '1' : ((currentPath.length === 0 && text.includes('guj')) ? '2' : text);
-
-                        if (targetMap[chosenKey]) {
-                            currentPath.push(chosenKey);
-                            reply = resolvePath(BOT_CONFIG.tree, currentPath).node?.prompt || "Selected.";
-                        } else {
-                            if (isNaN(text) || text.length > 2) {
-                                delete userSessions[from];
-                                return res.status(200).send('EVENT_RECEIVED');
-                            }
-                            reply = "Invalid option. Reply with a number, '0' for back, or '00' for main menu.";
-                        }
-                    }
-                }
-                if (reply) await sendWhatsAppMessage(from, reply, phoneNumberId);
-            }
-            return res.status(200).send('EVENT_RECEIVED');
+        if (req.body?.object !== 'whatsapp_business_account') {
+            return res.sendStatus(200);
         }
-        return res.sendStatus(404);
-    } catch (err) {
-        return res.status(500).send('Server Error');
+
+        cleanExpiredData();
+
+        const messages = getIncomingMessages(req.body);
+
+        for (const item of messages) {
+            await processTextMessage(item.message, item.phoneNumberId);
+        }
+
+        // Always acknowledge handled events, including send failures, to avoid retry loops.
+        return res.status(200).send('EVENT_RECEIVED');
+    } catch (error) {
+        console.error('Webhook processing error:', error.message);
+
+        // Acknowledge errors so Meta does not repeatedly deliver a failing event.
+        return res.status(200).send('EVENT_RECEIVED');
     }
 });
 
