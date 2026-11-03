@@ -926,26 +926,27 @@ async function processTextMessage(message, phoneNumberId) {
 
     let reply = '';
 
-    // MAIN MENU: 00 must be checked independently from 0
-    if (text === '00' || text === 'menu') {
-        if (currentPath.length > 0) {
-            session.path = [currentPath[0]];
-            reply = getCurrentPrompt(session.path);
-        } else {
-            reply = BOT_CONFIG.welcomeText;
-        }
+   // MAIN MENU: 00
+if (text === '00' || text === 'menu') {
+    if (session.language) {
+        session.path = [session.language];
+        reply = getCurrentPrompt(session.path);
+    } else {
+        session.path = [];
+        reply = BOT_CONFIG.welcomeText;
     }
+}
 
-    // BACK: 0
-    else if (text === '0' || text === 'back') {
-        if (currentPath.length > 1) {
-            session.path = currentPath.slice(0, -1);
-            reply = getCurrentPrompt(session.path);
-        } else {
-            session.path = [];
-            reply = BOT_CONFIG.welcomeText;
-        }
+// BACK: 0
+else if (text === '0' || text === 'back') {
+    if (currentPath.length > 1) {
+        session.path = currentPath.slice(0, -1);
+        reply = getCurrentPrompt(session.path);
+    } else {
+        session.path = [];
+        reply = BOT_CONFIG.welcomeText;
     }
+}
 
     // NORMAL MENU OPTION
     else {
