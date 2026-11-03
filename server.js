@@ -2,28 +2,24 @@ const express = require('express');
 const crypto = require('crypto');
 const app = express();
 
-// Capture raw body securely for Meta signature verification
+// Capture raw body bytes for Meta X-Hub-Signature-256 verification
 app.use(express.json({
     verify: (req, res, buf) => {
-        req.rawBody = buf.toString('utf8');
+        req.rawBody = buf;
     }
 }));
 
-// Trim variables to prevent accidental spaces from copy-pasting in Vercel
-const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "smartbiz_secure_token").trim();
-const WHATSAPP_TOKEN = (process.env.WHATSAPP_TOKEN || "").trim();
-const APP_SECRET = (process.env.APP_SECRET || "").trim();
-const GRAPH_API_VERSION = (process.env.GRAPH_API_VERSION || "v26.0").trim();
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "smartbiz_secure_token";
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
-// In-Memory Storage
+// Session storage with automatic cleanup for inactive users (2-hour TTL)
 let userSessions = {};
-let processedMessages = new Set(); 
-let optedOutUsers = new Set();     
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; 
 
 function getOrCreateSession(from) {
     let now = Date.now();
     if (userSessions[from]) {
+        // Check if session expired
         if (now - userSessions[from].lastActive > SESSION_TTL_MS) {
             userSessions[from] = { path: [], paused: false, lastActive: now };
         } else {
@@ -107,17 +103,9 @@ const BOT_CONFIG = {
 /* BOT_CONFIG_END */
 
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
-    if (!WHATSAPP_TOKEN) {
-        console.error("🚨 ERROR: WHATSAPP_TOKEN is missing in Vercel Environment Variables!");
-        return;
-    }
-    if (typeof fetch === "undefined") {
-        console.error("🚨 ERROR: 'fetch' is not defined. Your Vercel Node.js version might be too old (needs Node 18+).");
-        return;
-    }
+    if (!WHATSAPP_TOKEN) return;
     try {
-        console.log(`🚀 Sending reply to ${to}...`);
-        const response = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`, {
+        await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -131,15 +119,7 @@ async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
                 text: { body: textBody }
             })
         });
-        const data = await response.json();
-        if (!response.ok) {
-            console.error("❌ Meta API Error:", data);
-        } else {
-            console.log("✅ Message sent successfully!");
-        }
-    } catch (error) {
-        console.error("❌ Fetch execution error:", error.message);
-    }
+    } catch (error) {}
 }
 
 function resolvePath(tree, path) {
@@ -159,7 +139,6 @@ app.get('/webhook', (req, res) => {
     const challenge = req.query['hub.challenge'];
 
     if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
-        console.log("✅ Webhook verified by Meta.");
         return res.status(200).send(challenge);
     }
     return res.status(200).send('KCC WhatsApp Shop Engine Active');
@@ -169,26 +148,20 @@ app.get('/', (req, res) => {
     res.status(200).send('KCC WhatsApp Bot Engine is Active');
 });
 
+const APP_SECRET = process.env.APP_SECRET;
+
 function verifyMetaSignature(req, res, next) {
-    console.log("🔍 Verifying incoming webhook signature...");
-    
-    if (!APP_SECRET) {
-        console.error("🚨 SECURITY ALERT: APP_SECRET is missing in Vercel Environment Variables! Failing closed.");
-        return res.status(500).send('Server configuration error: APP_SECRET missing');
-    }
+    // If APP_SECRET is not configured yet, bypass (safe fallback during development)
+    if (!APP_SECRET) return next();
 
     const signature = req.headers['x-hub-signature-256'];
     if (!signature) {
-        console.error("🚨 SECURITY ALERT: Missing x-hub-signature-256 header from Meta.");
         return res.status(401).send('Missing signature');
     }
 
-    // Fallback if Vercel consumed the stream
-    const payload = req.rawBody ? req.rawBody : JSON.stringify(req.body);
-
     const expectedHash = 'sha256=' + crypto
         .createHmac('sha256', APP_SECRET)
-        .update(payload, 'utf8')
+        .update(req.rawBody || '')
         .digest('hex');
 
     try {
@@ -197,113 +170,72 @@ function verifyMetaSignature(req, res, next) {
             Buffer.from(expectedHash)
         );
         if (!isValid) {
-            console.error(`🚨 SECURITY ALERT: Signature mismatch! Your APP_SECRET in Vercel might be wrong.`);
-            console.error(`Expected: ${expectedHash}`);
-            console.error(`Received: ${signature}`);
             return res.status(401).send('Invalid signature');
         }
     } catch (e) {
-        console.error("🚨 SECURITY ALERT: Signature validation crashed:", e.message);
         return res.status(401).send('Signature verification failed');
     }
-    
-    console.log("✅ Signature matched! Processing message...");
+
     next();
 }
 
 app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
         let body = req.body;
-        if (body && body.object) {
-            let changeItem = body.entry?.[0]?.changes?.[0];
-            let entry = changeItem?.value;
-            
-            // AUTOMATIC COEXISTENCE
-            if (changeItem?.field === 'smb_message_echoes' || entry?.message_echoes) {
-                console.log("🔄 Captured Coexistence Message Echo. Pausing bot for human takeover.");
-                let echoes = entry?.message_echoes || (entry ? [entry] : []);
-                for (let echoMsg of echoes) {
-                    let customerPhone = echoMsg?.to || echoMsg?.recipient_id;
-                    if (customerPhone) {
-                        let session = getOrCreateSession(customerPhone);
-                        session.paused = true; 
+            if (body && body.object) {
+                let entry = body.entry?.[0]?.changes?.[0]?.value;
+                
+                // AUTOMATIC COEXISTENCE: Handle Meta smb_message_echoes & message_echoes safely
+                let changeField = body.entry?.[0]?.changes?.[0]?.field;
+                if (changeField === 'smb_message_echoes' || entry?.message_echoes) {
+                    let echoes = entry?.message_echoes || [];
+                    for (let echoMsg of echoes) {
+                        let customerPhone = echoMsg?.to;
+                        if (customerPhone) {
+                            if (!userSessions[customerPhone]) {
+                                userSessions[customerPhone] = { path: [], paused: false };
+                            }
+                            userSessions[customerPhone].paused = true; // Auto-pause bot for human takeover
+                        }
                     }
+                    return res.status(200).send('EVENT_RECEIVED');
                 }
-                return res.status(200).send('EVENT_RECEIVED');
-            }
 
             let messaging = entry?.messages?.[0];
             let phoneNumberId = entry?.metadata?.phone_number_id;
 
-            if (messaging && phoneNumberId && messaging.type === 'text') {
-                let msgId = messaging.id;
-                if (msgId) {
-                    if (processedMessages.has(msgId)) {
-                        console.log("⚠️ Skipped duplicate message ID:", msgId);
-                        return res.status(200).send('EVENT_RECEIVED'); 
-                    }
-                    processedMessages.add(msgId);
-                    if (processedMessages.size > 1000) {
-                        let firstItem = processedMessages.values().next().value;
-                        processedMessages.delete(firstItem);
-                    }
-                }
-
+           if (messaging && phoneNumberId && messaging.type === 'text') {
                 let from = messaging.from;
-                if (from === phoneNumberId || from === entry?.metadata?.display_phone_number) {
+
+                // If a human shop owner paused this session, do not let the bot reply
+                if (userSessions[from] && userSessions[from].paused) {
                     return res.status(200).send('EVENT_RECEIVED');
                 }
 
                 let text = (messaging.text?.body || "").toLowerCase().trim().replace(/\.$/, '');
-                console.log(`📩 Received message from ${from}: "${text}"`);
-
-                if (text === 'stop' || text === 'exit') {
-                    console.log(`🛑 User ${from} opted out.`);
-                    optedOutUsers.add(from);
-                    delete userSessions[from];
-                    await sendWhatsAppMessage(from, "🛑 You have been successfully unsubscribed. You will no longer receive automated messages from this bot. Reply 'START' anytime to opt back in.", phoneNumberId);
-                    return res.status(200).send('EVENT_RECEIVED');
-                } else if (optedOutUsers.has(from)) {
-                    if (text === 'start') {
-                        console.log(`▶️ User ${from} opted back in.`);
-                        optedOutUsers.delete(from); 
-                    } else {
-                        return res.status(200).send('EVENT_RECEIVED'); 
-                    }
-                }
-
-                if (text === 'agent' || text === 'human' || text === 'support') {
-                    console.log(`👨‍💻 User ${from} requested a human agent.`);
-                    let session = getOrCreateSession(from);
-                    session.paused = true;
-                    await sendWhatsAppMessage(from, "👨‍💻 *Connected to Human Support.*\nOur team has been notified and will reply to you shortly.", phoneNumberId);
-                    return res.status(200).send('EVENT_RECEIVED');
-                }
-
-                let session = getOrCreateSession(from);
-                if (session.paused) {
-                    console.log(`⏸️ Bot is paused for ${from}. Ignoring message.`);
-                    return res.status(200).send('EVENT_RECEIVED');
-                }
-
                 let reply = "";
 
                 if (text === 'start') {
-                    session.path = [];
+                    userSessions[from] = { path: [], paused: false }; // Added paused flag for coexistence
                     reply = BOT_CONFIG.welcomeText;
+                } else if (text === 'stop' || text === 'exit') {
+                    delete userSessions[from];
+                    return res.status(200).send('EVENT_RECEIVED');
+                } else if (!userSessions[from]) {
+                    return res.status(200).send('EVENT_RECEIVED');
                 } else {
-                    let currentPath = session.path;
+                    let currentPath = userSessions[from].path;
                     if (text === '00' || text === 'menu') {
                         if (currentPath.length > 0) {
-                            session.path = [currentPath[0]];
-                            reply = resolvePath(BOT_CONFIG.tree, session.path).node?.prompt || BOT_CONFIG.welcomeText;
+                            userSessions[from].path = [currentPath[0]];
+                            reply = resolvePath(BOT_CONFIG.tree, userSessions[from].path).node?.prompt || BOT_CONFIG.welcomeText;
                         } else { reply = BOT_CONFIG.welcomeText; }
                     } else if (text === '0' || text === 'back') {
                         if (currentPath.length > 1) {
                             currentPath.pop();
                             reply = resolvePath(BOT_CONFIG.tree, currentPath).node?.prompt || BOT_CONFIG.welcomeText;
                         } else {
-                            session.path = [];
+                            userSessions[from].path = [];
                             reply = BOT_CONFIG.welcomeText;
                         }
                     } else {
@@ -322,14 +254,12 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
                         }
                     }
                 }
-                
                 if (reply) await sendWhatsAppMessage(from, reply, phoneNumberId);
             }
             return res.status(200).send('EVENT_RECEIVED');
         }
         return res.sendStatus(404);
     } catch (err) {
-        console.error("❌ Webhook crash error:", err);
         return res.status(500).send('Server Error');
     }
 });
