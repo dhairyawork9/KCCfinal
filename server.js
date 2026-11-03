@@ -836,48 +836,32 @@ app.get('/', (req, res) => {
 // --------------------------------------------------
 // PROCESS CUSTOMER MESSAGE
 // --------------------------------------------------
+// STOP: pause only this customer
+if (text === 'stop' || text === 'exit') {
 
-async function processTextMessage(message, phoneNumberId) {
-    if (
-        !message ||
-        message.type !== 'text' ||
-        !phoneNumberId ||
-        !message.from
-    ) {
+    // If already paused, stay completely silent
+    if (session?.paused) {
         return;
     }
 
-    const from = message.from;
-    const messageId = message.id;
-    const text = normalizeText(message.text?.body);
+    session = session || {
+        path: [],
+        paused: false
+    };
 
-    // Ignore duplicate Meta webhook deliveries
-    if (await wasAlreadyHandled(messageId)) {
-        return;
-    }
+    session.paused = true;
+    session.pauseReason = 'stop';
 
-    let session = await getSession(from);
+    await saveSession(from, session);
 
-    // STOP: pause only this customer
-    if (text === 'stop' || text === 'exit') {
-        session = session || {
-            path: [],
-            paused: false
-        };
+    await sendWhatsAppMessage(
+        from,
+        'You have stopped receiving automated messages. Send *START* whenever you want to use the menu again.',
+        phoneNumberId
+    );
 
-        session.paused = true;
-        session.pauseReason = 'stop';
-
-        await saveSession(from, session);
-
-        await sendWhatsAppMessage(
-            from,
-            'You have stopped receiving automated messages. Send *START* whenever you want to use the menu again.',
-            phoneNumberId
-        );
-
-        return;
-    }
+    return;
+}
 
     // START: restart or reactivate this customer
     if (text === 'start') {
