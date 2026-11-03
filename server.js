@@ -8,20 +8,33 @@ app.use(express.json({
     }
 }));
 
-// Set these in Vercel Environment Variables.
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'smartbiz_secure_token';
+// Vercel Environment Variables
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const APP_SECRET = process.env.APP_SECRET;
 
-// Upstash Redis: configure both variables in Vercel.
-const SESSION_TTL_SECONDS = 2 * 60 * 60;
-const MESSAGE_ID_TTL_SECONDS = 24 * 60 * 60;
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
+// 15-minute inactivity timeout
+const SESSION_TTL_SECONDS = 15 * 60;
+
+// Keep paused sessions until START is received
+const PAUSED_TTL_SECONDS = 365 * 24 * 60 * 60;
+
+// Duplicate message protection
+const MESSAGE_ID_TTL_SECONDS = 24 * 60 * 60;
+
+// Prevent duplicate START messages sent within 3 seconds
+const START_DEBOUNCE_MS = 3000;
+
+// --------------------------------------------------
+// REDIS
+// --------------------------------------------------
+
 async function redisCommand(...args) {
     if (!REDIS_URL || !REDIS_TOKEN) {
-        throw new Error('Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN');
+        throw new Error('Redis environment variables are missing');
     }
 
     const response = await fetch(REDIS_URL, {
@@ -36,7 +49,7 @@ async function redisCommand(...args) {
     const data = await response.json();
 
     if (!response.ok || data.error) {
-        throw new Error(data.error || `Upstash request failed (${response.status})`);
+        throw new Error(data.error || 'Redis request failed');
     }
 
     return data.result;
@@ -48,6 +61,7 @@ function sessionKey(phone) {
 
 async function getSession(phone) {
     const result = await redisCommand('GET', sessionKey(phone));
+
     if (!result) return null;
 
     try {
@@ -61,12 +75,16 @@ async function getSession(phone) {
 async function saveSession(phone, session) {
     session.lastActive = Date.now();
 
+    const ttl = session.paused
+        ? PAUSED_TTL_SECONDS
+        : SESSION_TTL_SECONDS;
+
     await redisCommand(
         'SET',
         sessionKey(phone),
         JSON.stringify(session),
         'EX',
-        SESSION_TTL_SECONDS
+        ttl
     );
 }
 
@@ -89,79 +107,543 @@ async function wasAlreadyHandled(messageId) {
     return result !== 'OK';
 }
 
-// DATA-DRIVEN SHOP CONFIGURATION (Lightweight JSON Tree)
-/* BOT_CONFIG_START */
-const BOT_CONFIG = {
-  "welcomeText": "🙏 *WELCOME TO KAUSHALYA COMPUTER CENTRE!* 💻\n*કૌશલ્યા કોમ્પ્યુટર સેન્ટરમાં આપનું હાર્દિક સ્વાગત છે!*\n\n🌐 *Please select your preferred language:*\nકૃપા કરીને તમારી પસંદગીની ભાષા પસંદ કરો:\n\n1️⃣ English (ENG)\n2️⃣ ગુજરાતી (GUJ)\n\n✨ *We're here to help you. Let's get started!*\n✨ *અમે તમારી મદદ માટે અહીં છીએ. ચાલો, શરૂઆત કરીએ!*",
-  "tree": {
-    "1": {
-      "title": "English",
-      "prompt": "💻 *WELCOME TO KAUSHALYA COMPUTER SHOP!*\nકૌશલ્યા કોમ્પ્યુટર શોપમાં આપનું સ્વાગત છે! 🙏\n\n✨ *What would you like to explore today?*\nકૃપા કરીને નીચેના વિકલ્પોમાંથી પસંદ કરો:\n\n1️⃣ Courses 📚\n2️⃣ Computer Accessories 🖱️\n3️⃣ Services 🛠️\n4️⃣ Contact Details 📞\n\n━━━━━━━━━━━━━━\n🔹 Reply with the option number to continue.\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n👋 Reply *STOP* to exit.\n\nતમારી જરૂરિયાત મુજબનો વિકલ્પ પસંદ કરો અને અમારી સાથે જોડાઓ! 😊",
-      "children": {
-        "1": {
-          "title": "Courses",
-          "prompt": "📚 *KAUSHALYA COMPUTER CENTRE*\n🎓 *COURSES MENU | કોર્સ પસંદ કરો*\n\nExplore our computer courses and choose the course you are interested in! 💻\n\nકૃપા કરીને તમારી પસંદગીનો કોર્સ પસંદ કરવા માટે તેનો નંબર મોકલો.\n\n1️⃣ *CCC* – Course on Computer Concepts\n2️⃣ *Tally Prime with GST*\n3️⃣ *DTP* – Desktop Publishing\n4️⃣ *AutoCAD*\n5️⃣ *DCA* – Diploma in Computer Applications\n6️⃣ *Diploma in Web Designing*\n7️⃣ *ADCA* – Advanced Diploma in Computer Applications\n8️⃣ *Diploma in Graphic Designing*\n9️⃣ *PGDCA* – Post Graduate Diploma in Computer Applications\n🔟 *C Programming*\n1️⃣1️⃣ *C++ Programming*\n1️⃣2️⃣ *Video Editing* 🎬\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *Choose your course and take the next step towards your digital future!*\n✨ *તમારો કોર્સ પસંદ કરો અને તમારા ડિજિટલ ભવિષ્ય તરફ આગળ વધો!*",
-          "children": {
-            "1": {
-              "title": " *CCC* – Course on Computer Concepts",
-              "prompt": "💻 *CCC – COURSE ON COMPUTER CONCEPTS*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹3,150\n⏳ *Duration:* 2 Months\n\n📚 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Computer Fundamentals\n✅ MS Paint\n✅ MS PowerPoint\n✅ MS Word\n✅ Gujarati Typing\n✅ MS Excel\n✅ MS Windows\n✅ Internet Basics\n✅ ChatGPT & Google Gemini 🤖\n✅ Practical Project\n\n🎯 *Learn Computer Skills with Practical Training!*\n💡 Build your digital skills and gain confidence in using computers.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n📞 *KAUSHALYA COMPUTER CENTRE*\n*Your Learning, Our Priority!*",
-              "children": {}
-            },
-            "2": {
-              "title": "Tally Prime with GST",
-              "prompt": "💻 *TALLY PRIME WITH GST*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹4,500\n⏳ *Duration:* 2 Months\n\n📚 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Computer Fundamentals\n✅ MS Paint\n✅ Tally Prime & Company Creation\n✅ Groups & Ledger Creation\n✅ Voucher Entries\n✅ Balance Sheet & Profit and Loss (P&L)\n✅ Billing & Stock Management\n✅ GST, TDS, Services & Tax\n✅ Backup & Restore\n✅ Data Updation & Cancellation\n✅ Company Features & Configuration\n✅ Manufacturing Entries\n✅ Buy One Get One (BOGO) Entries\n✅ Reconciliation & Amendments\n\n🎯 *Learn Practical Accounting & GST Skills!*\n📊 Gain hands-on knowledge of accounting, inventory, taxation and business transactions.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *KAUSHALYA COMPUTER CENTRE*\n*Learn Today, Succeed Tomorrow!*",
-              "children": {}
-            },
-            "3": {
-              "title": "DTP – Desktop Publishing",
-              "prompt": "🎨 *DTP – DESKTOP PUBLISHING*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹4,500\n⏳ *Duration:* 3 Months\n\n📚 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Computer Fundamentals\n✅ MS Paint\n✅ Instant Artist\n✅ PageMaker\n✅ CorelDRAW\n✅ Adobe Photoshop\n✅ Gujarati Typing\n✅ MS Windows\n✅ Practical Project\n\n🎯 *Learn Design. Create. Innovate!* 🎨\n\n💡 Develop your skills in graphic design, page layout, image editing and Gujarati typing through practical training.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *KAUSHALYA COMPUTER CENTRE*\n*Turning Your Creativity into Skills!*",
-              "children": {}
-            },
-            "4": {
-              "title": "AutoCAD",
-              "prompt": "🏗️ *AUTOCAD COURSE*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹4,500\n⏳ *Duration:* 2 Months\n\n📐 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Concepts of CAD\n✅ 2D & 3D Commands\n✅ Isometric Drawing\n✅ Dimensions & Drawing Tools\n✅ 20+ Plans & Practical Projects\n✅ 3D Plans & Projects\n✅ Civil Engineering Projects\n✅ Mechanical Engineering Projects\n✅ Electrical Engineering Projects\n✅ Advanced Drawing Techniques & More\n\n🎯 *Design Your Ideas with Precision!*\n\n💡 Learn technical drawing, 2D drafting and 3D design through practical training and project work.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *KAUSHALYA COMPUTER CENTRE*\n*Learn Skills. Design the Future!*",
-              "children": {}
-            },
-            "5": {
-              "title": "DCA – Diploma in Computer Applications",
-              "prompt": "🎓 *DCA – DIPLOMA IN COMPUTER APPLICATIONS*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹9,500\n⏳ *Duration:* 6 Months\n\n📚 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Computer Fundamentals\n✅ MS Paint\n✅ MS Office\n   📄 MS Word\n   📊 MS Excel\n   📽️ MS PowerPoint\n✅ Internet & Web Browsing\n✅ Practical Project\n\n🎯 *Build Your Computer Skills with Confidence!*\n\n💻 Gain practical knowledge of essential computer applications and develop skills useful for education, office work and everyday digital tasks.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *KAUSHALYA COMPUTER CENTRE*\n*Learn Today, Grow Tomorrow!*",
-              "children": {}
-            },
-            "6": {
-              "title": "Diploma in Web Designing",
-              "prompt": "🌐 *DIPLOMA IN WEB DESIGNING*\n🏫 *KAUSHALYA COMPUTER CENTRE*\n\n💰 *Course Fees:* ₹11,500\n⏳ *Duration:* 4 Months\n\n📚 *COURSE CONTENT | અભ્યાસક્રમ*\n\n✅ Website Fundamentals\n✅ HTML – HyperText Markup Language\n✅ CSS – Cascading Style Sheets\n✅ Adobe Dreamweaver\n✅ WordPress Website Design\n✅ Website Uploading & Hosting\n✅ Website Development\n✅ Blogging\n✅ Adobe Photoshop\n\n🎯 *Design. Develop. Launch Your Website!*\n\n💻 Learn the fundamentals of website design and development through practical training and projects. Build your skills to create and publish websites.\n\n━━━━━━━━━━━━━━\n🔙 Reply *0* to go back.\n🏠 Reply *00* to return to the Main Menu.\n\n✨ *KAUSHALYA COMPUTER CENTRE*\n*Turn Your Ideas into Websites!*",
-              "children": {}
-            }
-          }
-        },
-        "2": {
-          "title": "Computer Accessories",
-          "prompt": "🖥️ *COMPUTER ACCESSORIES*\n*KAUSHALYA COMPUTER SHOP*\n\n🛒 *Available Accessories:*\n\n▪️ Keyboard & Mouse\n▪️ Headphones & Speakers\n▪️ USB Drives & Memory Cards\n▪️ Data Cables & Connectors\n▪️ Chargers & Adapters\n▪️ Computer Cables\n▪️ Wi-Fi Adapters & Networking Accessories\n▪️ Printer Accessories & Ink\n▪️ Mouse Pads\n▪️ Monitors & Computer Parts\n▪️ Laptop Accessories\n▪️ HDMI & VGA Cables\n▪️ USB Hubs\n▪️ Webcams\n▪️ Power Supplies\n▪️ Other Computer Accessories\n\n📞 *For product availability and prices, please contact us.*\n\n🏫 *KAUSHALYA COMPUTER SHOP*\n*Your Trusted Computer Partner!*",
-          "children": {}
-        },
-        "3": {
-          "title": "Services ",
-          "prompt": "📚 Computer Courses\n🖥️ Computer Sales & Accessories\n🛠️ Computer Repairing & Maintenance\n🖨️ Printer Services & Refilling\n📄 Online Forms & Computer Job Work",
-          "children": {}
-        },
-        "4": {
-          "title": "Contact Details",
-          "prompt": "🏫 KAUSHALYA COMPUTER CENTRE\n📞 CONTACT DETAILS | સંપર્ક વિગતો\n\n📍 Address: \n📱 Mobile / WhatsApp: +91 98985 25295\n☎️ Alternate Number: +91 99985 25295\n📧 Email: customerkcc@gmail.com\n📸 Instagram: https://www.instagram.com/kaushalyacomputer_kapadwanj?dlrf=ZDcwMHVuZmxtbWNq\n🕒 Business Hours: 8 AM TO 8 PM\n📅 Weekly Holiday: MON TO SAT",
-          "children": {}
-        }
-      }
-    },
-    "2": {
-      "title": "ગુજરાતી",
-      "prompt": "કૌશલ્યા કોમ્પ્યુટરમાં આપનું સ્વાગત છે:\r\n1. કોમ્પ્યુટર કોર્સ\r\n2. લેપટોપ અને ડેસ્કટોપ\r\n\r\n(નંબર મોકલો, પાછા જવા '0', મુખ્ય મેનૂ '00')",
-      "children": {}
-    }
-  }
+// --------------------------------------------------
+// MENU HELPERS
+// --------------------------------------------------
+
+function leaf(title, prompt) {
+    return {
+        title,
+        prompt,
+        children: {}
+    };
+}
+
+function node(title, prompt, children) {
+    return {
+        title,
+        prompt,
+        children
+    };
+}
+
+const NAV_EN =
+    '\n\n━━━━━━━━━━━━━━\n' +
+    '🔙 Reply *0* to go back.\n' +
+    '🏠 Reply *00* to return to the main menu.\n' +
+    '👋 Reply *STOP* to exit.';
+
+const NAV_GU =
+    '\n\n━━━━━━━━━━━━━━\n' +
+    '🔙 પાછા જવા *0* મોકલો.\n' +
+    '🏠 મુખ્ય મેનૂ માટે *00* મોકલો.\n' +
+    '👋 બંધ કરવા *STOP* મોકલો.';
+
+// --------------------------------------------------
+// ENGLISH COURSES
+// --------------------------------------------------
+
+const englishCourses = {
+    '1': leaf('CCC', `💻 *CCC – COURSE ON COMPUTER CONCEPTS*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹3,150
+⏳ *Duration:* 2 Months
+
+📚 *COURSE CONTENT*
+
+✅ Computer Fundamentals
+✅ MS Paint
+✅ MS PowerPoint
+✅ MS Word
+✅ Gujarati Typing
+✅ MS Excel
+✅ MS Windows
+✅ Internet Basics
+✅ ChatGPT & Google Gemini 🤖
+✅ Practical Project
+
+🎯 *Learn Computer Skills with Practical Training!*
+💡 Build your digital skills and gain confidence in using computers.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Your Learning, Our Priority!*${NAV_EN}`),
+
+    '2': leaf('Tally Prime with GST', `💻 *TALLY PRIME WITH GST*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹4,500
+⏳ *Duration:* 2 Months
+
+📚 *COURSE CONTENT*
+
+✅ Computer Fundamentals
+✅ MS Paint
+✅ Tally Prime & Company Creation
+✅ Groups & Ledger Creation
+✅ Voucher Entries
+✅ Balance Sheet & Profit and Loss (P&L)
+✅ Billing & Stock Management
+✅ GST, TDS, Services & Tax
+✅ Backup & Restore
+✅ Data Updation & Cancellation
+✅ Company Features & Configuration
+✅ Manufacturing Entries
+✅ Buy One Get One (BOGO) Entries
+✅ Reconciliation & Amendments
+
+🎯 *Learn Practical Accounting & GST Skills!*
+📊 Gain hands-on knowledge of accounting, inventory, taxation and business transactions.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Learn Today, Succeed Tomorrow!*${NAV_EN}`),
+
+    '3': leaf('DTP', `🎨 *DTP – DESKTOP PUBLISHING*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹4,500
+⏳ *Duration:* 3 Months
+
+📚 *COURSE CONTENT*
+
+✅ Computer Fundamentals
+✅ MS Paint
+✅ Instant Artist
+✅ PageMaker
+✅ CorelDRAW
+✅ Adobe Photoshop
+✅ Gujarati Typing
+✅ MS Windows
+✅ Practical Project
+
+🎯 *Learn Design. Create. Innovate!* 🎨
+💡 Develop your skills in graphic design, page layout, image editing and Gujarati typing through practical training.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Turning Your Creativity into Skills!*${NAV_EN}`),
+
+    '4': leaf('AutoCAD', `🏗️ *AUTOCAD COURSE*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹4,500
+⏳ *Duration:* 2 Months
+
+📐 *COURSE CONTENT*
+
+✅ Concepts of CAD
+✅ 2D & 3D Commands
+✅ Isometric Drawing
+✅ Dimensions & Drawing Tools
+✅ 20+ Plans & Practical Projects
+✅ 3D Plans & Projects
+✅ Civil Engineering Projects
+✅ Mechanical Engineering Projects
+✅ Electrical Engineering Projects
+✅ Advanced Drawing Techniques & More
+
+🎯 *Design Your Ideas with Precision!*
+💡 Learn technical drawing, 2D drafting and 3D design through practical training and project work.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Learn Skills. Design the Future!*${NAV_EN}`),
+
+    '5': leaf('DCA', `🎓 *DCA – DIPLOMA IN COMPUTER APPLICATIONS*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹9,500
+⏳ *Duration:* 6 Months
+
+📚 *COURSE CONTENT*
+
+✅ Computer Fundamentals
+✅ MS Paint
+✅ MS Office
+   📄 MS Word
+   📊 MS Excel
+   📽️ MS PowerPoint
+✅ Internet & Web Browsing
+✅ Practical Project
+
+🎯 *Build Your Computer Skills with Confidence!*
+💻 Gain practical knowledge of essential computer applications and develop skills useful for education, office work and everyday digital tasks.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Learn Today, Grow Tomorrow!*${NAV_EN}`),
+
+    '6': leaf('Diploma in Web Designing', `🌐 *DIPLOMA IN WEB DESIGNING*
+🏫 *KAUSHALYA COMPUTER CENTRE*
+
+💰 *Course Fees:* ₹11,500
+⏳ *Duration:* 4 Months
+
+📚 *COURSE CONTENT*
+
+✅ Website Fundamentals
+✅ HTML – HyperText Markup Language
+✅ CSS – Cascading Style Sheets
+✅ Adobe Dreamweaver
+✅ WordPress Website Design
+✅ Website Uploading & Hosting
+✅ Website Development
+✅ Blogging
+✅ Adobe Photoshop
+
+🎯 *Design. Develop. Launch Your Website!*
+💻 Learn the fundamentals of website design and development through practical training and projects. Build your skills to create and publish websites.
+
+✨ *KAUSHALYA COMPUTER CENTRE*
+*Turn Your Ideas into Websites!*${NAV_EN}`)
 };
-/* BOT_CONFIG_END */
+
+// Courses listed without supplied details
+const otherEnglishCourses = {
+    '7': 'ADCA – Advanced Diploma in Computer Applications',
+    '8': 'Diploma in Graphic Designing',
+    '9': 'PGDCA – Post Graduate Diploma in Computer Applications',
+    '10': 'C Programming',
+    '11': 'C++ Programming',
+    '12': 'Video Editing'
+};
+
+for (const [key, name] of Object.entries(otherEnglishCourses)) {
+    englishCourses[key] = leaf(
+        name,
+        `📚 *${name}*\n\nFor course fees, duration and detailed syllabus, please contact Kaushalya Computer Centre.\n\n📞 +91 98985 25295${NAV_EN}`
+    );
+}
+
+// --------------------------------------------------
+// GUJARATI COURSES
+// --------------------------------------------------
+
+const gujaratiCourses = {
+    '1': leaf('CCC', `💻 *CCC – કમ્પ્યુટર કોન્સેપ્ટ કોર્સ*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹3,150
+⏳ *સમયગાળો:* 2 મહિના
+
+📚 *અભ્યાસક્રમ*
+
+✅ કમ્પ્યુટરના મૂળભૂત જ્ઞાન
+✅ MS Paint
+✅ MS PowerPoint
+✅ MS Word
+✅ ગુજરાતી ટાઇપિંગ
+✅ MS Excel
+✅ MS Windows
+✅ ઇન્ટરનેટનું મૂળભૂત જ્ઞાન
+✅ ChatGPT અને Google Gemini 🤖
+✅ પ્રેક્ટિકલ પ્રોજેક્ટ
+
+🎯 પ્રેક્ટિકલ તાલીમ સાથે કમ્પ્યુટર શીખો!
+
+*તમારું શિક્ષણ, અમારી પ્રાથમિકતા!*${NAV_GU}`),
+
+    '2': leaf('Tally Prime with GST', `💻 *TALLY PRIME WITH GST*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹4,500
+⏳ *સમયગાળો:* 2 મહિના
+
+📚 *અભ્યાસક્રમ*
+
+✅ કમ્પ્યુટરના મૂળભૂત જ્ઞાન
+✅ MS Paint
+✅ Tally Prime અને Company Creation
+✅ Groups અને Ledger Creation
+✅ Voucher Entries
+✅ Balance Sheet અને Profit & Loss
+✅ Billing અને Stock Management
+✅ GST, TDS અને Tax
+✅ Backup અને Restore
+✅ Data Updation અને Cancellation
+✅ Company Features અને Configuration
+✅ Manufacturing Entries
+✅ BOGO Entries
+✅ Reconciliation અને Amendments
+
+🎯 એકાઉન્ટિંગ અને GST ની પ્રેક્ટિકલ તાલીમ મેળવો!${NAV_GU}`),
+
+    '3': leaf('DTP', `🎨 *DTP – ડેસ્કટોપ પબ્લિશિંગ*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹4,500
+⏳ *સમયગાળો:* 3 મહિના
+
+📚 *અભ્યાસક્રમ*
+
+✅ કમ્પ્યુટરના મૂળભૂત જ્ઞાન
+✅ MS Paint
+✅ Instant Artist
+✅ PageMaker
+✅ CorelDRAW
+✅ Adobe Photoshop
+✅ ગુજરાતી ટાઇપિંગ
+✅ MS Windows
+✅ પ્રેક્ટિકલ પ્રોજેક્ટ
+
+🎯 ડિઝાઇન શીખો અને તમારી સર્જનાત્મકતા વિકસાવો!${NAV_GU}`),
+
+    '4': leaf('AutoCAD', `🏗️ *AUTOCAD કોર્સ*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹4,500
+⏳ *સમયગાળો:* 2 મહિના
+
+📐 *અભ્યાસક્રમ*
+
+✅ CAD ના મૂળભૂત સિદ્ધાંતો
+✅ 2D અને 3D Commands
+✅ Isometric Drawing
+✅ Dimensions અને Drawing Tools
+✅ 20 થી વધુ Plans અને Projects
+✅ 3D Plans અને Projects
+✅ Civil Engineering Projects
+✅ Mechanical Engineering Projects
+✅ Electrical Engineering Projects
+✅ Advanced Drawing Techniques
+
+🎯 ચોકસાઈ સાથે ડિઝાઇન કરવાનું શીખો!${NAV_GU}`),
+
+    '5': leaf('DCA', `🎓 *DCA – કમ્પ્યુટર એપ્લિકેશન ડિપ્લોમા*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹9,500
+⏳ *સમયગાળો:* 6 મહિના
+
+📚 *અભ્યાસક્રમ*
+
+✅ કમ્પ્યુટરના મૂળભૂત જ્ઞાન
+✅ MS Paint
+✅ MS Office
+   📄 MS Word
+   📊 MS Excel
+   📽️ MS PowerPoint
+✅ ઇન્ટરનેટ અને વેબ બ્રાઉઝિંગ
+✅ પ્રેક્ટિકલ પ્રોજેક્ટ
+
+🎯 કમ્પ્યુટર એપ્લિકેશનનું પ્રેક્ટિકલ જ્ઞાન મેળવો!${NAV_GU}`),
+
+    '6': leaf('Diploma in Web Designing', `🌐 *વેબ ડિઝાઇનિંગ ડિપ્લોમા*
+🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+
+💰 *કોર્સ ફી:* ₹11,500
+⏳ *સમયગાળો:* 4 મહિના
+
+📚 *અભ્યાસક્રમ*
+
+✅ Website Fundamentals
+✅ HTML
+✅ CSS
+✅ Adobe Dreamweaver
+✅ WordPress Website Design
+✅ Website Uploading અને Hosting
+✅ Website Development
+✅ Blogging
+✅ Adobe Photoshop
+
+🎯 તમારી પોતાની વેબસાઇટ બનાવતા શીખો!${NAV_GU}`)
+};
+
+const otherGujaratiCourses = {
+    '7': 'ADCA – એડવાન્સ્ડ ડિપ્લોમા',
+    '8': 'ગ્રાફિક ડિઝાઇનિંગ ડિપ્લોમા',
+    '9': 'PGDCA – પોસ્ટ ગ્રેજ્યુએટ ડિપ્લોમા',
+    '10': 'C Programming',
+    '11': 'C++ Programming',
+    '12': 'Video Editing'
+};
+
+for (const [key, name] of Object.entries(otherGujaratiCourses)) {
+    gujaratiCourses[key] = leaf(
+        name,
+        `📚 *${name}*\n\nકોર્સની ફી, સમયગાળો અને અભ્યાસક્રમની માહિતી માટે કૌશલ્યા કોમ્પ્યુટર સેન્ટરનો સંપર્ક કરો.\n\n📞 +91 98985 25295${NAV_GU}`
+    );
+}
+
+// --------------------------------------------------
+// MAIN MENUS
+// --------------------------------------------------
+
+const englishTree = {
+    '1': node('Courses',
+        `📚 *KAUSHALYA COMPUTER CENTRE*
+🎓 *COURSES MENU*
+
+1️⃣ CCC – Course on Computer Concepts
+2️⃣ Tally Prime with GST
+3️⃣ DTP – Desktop Publishing
+4️⃣ AutoCAD
+5️⃣ DCA – Diploma in Computer Applications
+6️⃣ Diploma in Web Designing
+7️⃣ ADCA – Advanced Diploma
+8️⃣ Diploma in Graphic Designing
+9️⃣ PGDCA
+🔟 C Programming
+1️⃣1️⃣ C++ Programming
+1️⃣2️⃣ Video Editing${NAV_EN}`,
+        englishCourses
+    ),
+
+    '2': leaf('Computer Accessories', `🖥️ *COMPUTER ACCESSORIES*
+*KAUSHALYA COMPUTER SHOP*
+
+🛒 *Available Accessories:*
+
+▪️ Keyboard & Mouse
+▪️ Headphones & Speakers
+▪️ USB Drives & Memory Cards
+▪️ Data Cables & Connectors
+▪️ Chargers & Adapters
+▪️ Computer Cables
+▪️ Wi-Fi Adapters & Networking Accessories
+▪️ Printer Accessories & Ink
+▪️ Mouse Pads
+▪️ Monitors & Computer Parts
+▪️ Laptop Accessories
+▪️ HDMI & VGA Cables
+▪️ USB Hubs
+▪️ Webcams
+▪️ Power Supplies
+▪️ Other Computer Accessories
+
+📞 For product availability and prices, please contact us.
+
+🏫 *KAUSHALYA COMPUTER SHOP*
+*Your Trusted Computer Partner!*${NAV_EN}`),
+
+    '3': leaf('Services', `🛠️ *KAUSHALYA COMPUTER CENTRE – SERVICES*
+
+📚 Computer Courses
+🖥️ Computer Sales & Accessories
+🛠️ Computer Repairing & Maintenance
+🖨️ Printer Services & Refilling
+📄 Online Forms & Computer Job Work${NAV_EN}`),
+
+    '4': leaf('Contact Details', `🏫 *KAUSHALYA COMPUTER CENTRE*
+📞 *CONTACT DETAILS*
+
+📍 Address: 
+📱 Mobile / WhatsApp: +91 98985 25295
+☎️ Alternate Number: +91 99985 25295
+📧 Email: customerkcc@gmail.com
+📸 Instagram: https://www.instagram.com/kaushalyacomputer_kapadwanj?dlrf=ZDcwMHVuZmxtbWNq
+🕒 Business Hours: 8 AM TO 8 PM
+📅 Weekly Holiday: MON TO SAT${NAV_EN}`)
+};
+
+const gujaratiTree = {
+    '1': node('કમ્પ્યુટર કોર્સ',
+        `📚 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+🎓 *કોર્સ મેનૂ*
+
+1️⃣ CCC
+2️⃣ Tally Prime with GST
+3️⃣ DTP
+4️⃣ AutoCAD
+5️⃣ DCA
+6️⃣ Diploma in Web Designing
+7️⃣ ADCA
+8️⃣ Graphic Designing
+9️⃣ PGDCA
+🔟 C Programming
+1️⃣1️⃣ C++ Programming
+1️⃣2️⃣ Video Editing${NAV_GU}`,
+        gujaratiCourses
+    ),
+
+    '2': leaf('કમ્પ્યુટર એસેસરીઝ', `🖥️ *કમ્પ્યુટર એસેસરીઝ*
+*કૌશલ્યા કોમ્પ્યુટર શોપ*
+
+🛒 *ઉપલબ્ધ વસ્તુઓ:*
+
+▪️ કીબોર્ડ અને માઉસ
+▪️ હેડફોન અને સ્પીકર્સ
+▪️ USB ડ્રાઇવ અને મેમરી કાર્ડ
+▪️ ડેટા કેબલ અને કનેક્ટર્સ
+▪️ ચાર્જર અને એડેપ્ટર
+▪️ કમ્પ્યુટર કેબલ
+▪️ Wi-Fi એડેપ્ટર અને નેટવર્કિંગ એસેસરીઝ
+▪️ પ્રિન્ટર એસેસરીઝ અને ઇંક
+▪️ માઉસ પેડ
+▪️ મોનિટર અને કમ્પ્યુટર પાર્ટ્સ
+▪️ લેપટોપ એસેસરીઝ
+▪️ HDMI અને VGA કેબલ
+▪️ USB હબ
+▪️ વેબકેમ
+▪️ પાવર સપ્લાય
+▪️ અન્ય કમ્પ્યુટર એસેસરીઝ
+
+📞 વસ્તુઓની ઉપલબ્ધતા અને કિંમત માટે અમારો સંપર્ક કરો.${NAV_GU}`),
+
+    '3': leaf('સેવાઓ', `🛠️ *કૌશલ્યા કોમ્પ્યુટર સેન્ટર – સેવાઓ*
+
+📚 કમ્પ્યુટર કોર્સ
+🖥️ કમ્પ્યુટર વેચાણ અને એસેસરીઝ
+🛠️ કમ્પ્યુટર રિપેરિંગ અને મેઇન્ટેનન્સ
+🖨️ પ્રિન્ટર સર્વિસ અને રિફિલિંગ
+📄 ઓનલાઇન ફોર્મ અને કમ્પ્યુટર જોબ વર્ક${NAV_GU}`),
+
+    '4': leaf('સંપર્ક વિગતો', `🏫 *કૌશલ્યા કોમ્પ્યુટર સેન્ટર*
+📞 *સંપર્ક વિગતો*
+
+📍 સરનામું:
+📱 મોબાઇલ / WhatsApp: +91 98985 25295
+☎️ વૈકલ્પિક નંબર: +91 99985 25295
+📧 Email: customerkcc@gmail.com
+📸 Instagram: https://www.instagram.com/kaushalyacomputer_kapadwanj?dlrf=ZDcwMHVuZmxtbWNq
+🕒 સમય: સવારે 8 થી રાત્રે 8
+📅 સાપ્તાહિક રજા: MON TO SAT${NAV_GU}`)
+};
+
+const BOT_CONFIG = {
+    welcomeText: `🙏 *WELCOME TO KAUSHALYA COMPUTER CENTRE!* 💻
+*કૌશલ્યા કોમ્પ્યુટર સેન્ટરમાં આપનું હાર્દિક સ્વાગત છે!*
+
+🌐 *Please select your preferred language:*
+કૃપા કરીને તમારી પસંદગીની ભાષા પસંદ કરો:
+
+1️⃣ English (ENG)
+2️⃣ ગુજરાતી (GUJ)
+
+✨ *We're here to help you. Let's get started!*
+✨ *અમે તમારી મદદ માટે અહીં છીએ. ચાલો, શરૂઆત કરીએ!*`,
+
+    tree: {
+        '1': node('English',
+            `💻 *WELCOME TO KAUSHALYA COMPUTER CENTRE!*
+
+✨ *What would you like to explore today?*
+
+1️⃣ Courses 📚
+2️⃣ Computer Accessories 🖱️
+3️⃣ Services 🛠️
+4️⃣ Contact Details 📞${NAV_EN}`,
+            englishTree
+        ),
+
+        '2': node('ગુજરાતી',
+            `🙏 *કૌશલ્યા કોમ્પ્યુટર સેન્ટરમાં આપનું સ્વાગત છે!*
+
+✨ *આજે તમે શું જાણવા માંગો છો?*
+
+1️⃣ કમ્પ્યુટર કોર્સ 📚
+2️⃣ કમ્પ્યુટર એસેસરીઝ 🖱️
+3️⃣ સેવાઓ 🛠️
+4️⃣ સંપર્ક વિગતો 📞${NAV_GU}`,
+            gujaratiTree
+        )
+    }
+};
+
+// --------------------------------------------------
+// WHATSAPP MESSAGE SENDING
+// --------------------------------------------------
 
 async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
     if (!WHATSAPP_TOKEN || !phoneNumberId || !to || !textBody) {
+        console.error('WhatsApp sending configuration missing');
         return false;
     }
 
@@ -184,10 +666,13 @@ async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
             }
         );
 
-        // A failed Meta response is handled locally; do not throw and trigger webhook retries.
         if (!response.ok) {
             const errorBody = await response.text().catch(() => '');
-            console.error('WhatsApp send failed:', response.status, errorBody.slice(0, 500));
+            console.error(
+                'WhatsApp send failed:',
+                response.status,
+                errorBody.slice(0, 500)
+            );
             return false;
         }
 
@@ -198,33 +683,63 @@ async function sendWhatsAppMessage(to, textBody, phoneNumberId) {
     }
 }
 
+// --------------------------------------------------
+// MENU NAVIGATION
+// --------------------------------------------------
+
 function resolvePath(tree, path) {
     let currentMap = tree;
     let lastNode = null;
 
     for (const step of path) {
         if (!currentMap || !currentMap[step]) return null;
+
         lastNode = currentMap[step];
         currentMap = lastNode.children;
     }
 
-    return { node: lastNode, children: currentMap || {} };
+    return {
+        node: lastNode,
+        children: currentMap || {}
+    };
 }
 
 function normalizeText(value) {
-    return String(value || '').trim().toLowerCase();
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[.!?]+$/g, '');
 }
+
+function getCurrentTree(path) {
+    if (!path.length) return BOT_CONFIG.tree;
+
+    const resolved = resolvePath(BOT_CONFIG.tree, path);
+    return resolved?.children || {};
+}
+
+function getCurrentPrompt(path) {
+    if (!path.length) return BOT_CONFIG.welcomeText;
+
+    return resolvePath(BOT_CONFIG.tree, path)?.node?.prompt
+        || BOT_CONFIG.welcomeText;
+}
+
+// --------------------------------------------------
+// HUMAN TAKEOVER
+// --------------------------------------------------
 
 async function pauseForHuman(customerPhone) {
     if (!customerPhone) return;
 
     const session = await getSession(customerPhone) || {
         path: [],
-        paused: false,
-        lastActive: Date.now()
+        paused: false
     };
 
     session.paused = true;
+    session.pauseReason = 'human';
+
     await saveSession(customerPhone, session);
 }
 
@@ -235,10 +750,15 @@ async function getIncomingMessages(body) {
         for (const change of entry?.changes || []) {
             const value = change?.value;
 
-            // Coexistence: a business-app echo means a person is replying.
-            if (change?.field === 'smb_message_echoes' || value?.message_echoes) {
+            // WhatsApp Business App human reply echo
+            if (
+                change?.field === 'smb_message_echoes' ||
+                value?.message_echoes
+            ) {
                 for (const echo of value?.message_echoes || []) {
-                    if (echo?.to) await pauseForHuman(echo.to);
+                    if (echo?.to) {
+                        await pauseForHuman(echo.to);
+                    }
                 }
             }
 
@@ -254,16 +774,18 @@ async function getIncomingMessages(body) {
     return messages;
 }
 
+// --------------------------------------------------
+// META SIGNATURE VERIFICATION
+// --------------------------------------------------
+
 function verifyMetaSignature(req, res, next) {
-    // Signature verification must be enabled in production.
     if (!APP_SECRET) {
-        if (process.env.NODE_ENV === 'production') {
-            return res.status(500).send('APP_SECRET is not configured');
-        }
-        return next();
+        console.error('APP_SECRET is missing');
+        return res.status(500).send('APP_SECRET is not configured');
     }
 
     const signature = req.headers['x-hub-signature-256'];
+
     if (typeof signature !== 'string' || !req.rawBody) {
         return res.status(401).send('Missing signature');
     }
@@ -286,12 +808,21 @@ function verifyMetaSignature(req, res, next) {
     next();
 }
 
+// --------------------------------------------------
+// WEBHOOK VERIFICATION
+// --------------------------------------------------
+
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
-    if (mode === 'subscribe' && token === VERIFY_TOKEN && challenge) {
+    if (
+        mode === 'subscribe' &&
+        VERIFY_TOKEN &&
+        token === VERIFY_TOKEN &&
+        challenge
+    ) {
         return res.status(200).send(challenge);
     }
 
@@ -302,101 +833,166 @@ app.get('/', (req, res) => {
     res.status(200).send('KCC WhatsApp Bot Engine is Active');
 });
 
+// --------------------------------------------------
+// PROCESS CUSTOMER MESSAGE
+// --------------------------------------------------
+
 async function processTextMessage(message, phoneNumberId) {
-    if (!message || message.type !== 'text' || !phoneNumberId || !message.from) {
+    if (
+        !message ||
+        message.type !== 'text' ||
+        !phoneNumberId ||
+        !message.from
+    ) {
         return;
     }
 
     const from = message.from;
     const messageId = message.id;
+    const text = normalizeText(message.text?.body);
 
-    if (await wasAlreadyHandled(messageId)) return;
-
-    const text = normalizeText(message.text?.body).replace(/[.!?]+$/g, '');
-
-    // STOP/EXIT ends the bot session. START explicitly reactivates it.
-    if (text === 'stop' || text === 'exit') {
-        await deleteSession(from);
+    // Ignore duplicate Meta webhook deliveries
+    if (await wasAlreadyHandled(messageId)) {
         return;
     }
 
+    let session = await getSession(from);
+
+    // STOP: pause only this customer
+    if (text === 'stop' || text === 'exit') {
+        session = session || {
+            path: [],
+            paused: false
+        };
+
+        session.paused = true;
+        session.pauseReason = 'stop';
+
+        await saveSession(from, session);
+
+        await sendWhatsAppMessage(
+            from,
+            'You have stopped receiving automated messages. Send *START* whenever you want to use the menu again.',
+            phoneNumberId
+        );
+
+        return;
+    }
+
+    // START: restart or reactivate this customer
     if (text === 'start') {
+        if (
+            session &&
+            !session.paused &&
+            session.lastStartAt &&
+            Date.now() - session.lastStartAt < START_DEBOUNCE_MS
+        ) {
+            return;
+        }
+
         await saveSession(from, {
             path: [],
             paused: false,
-            lastActive: Date.now()
+            pauseReason: null,
+            lastStartAt: Date.now()
         });
 
-        await sendWhatsAppMessage(from, BOT_CONFIG.welcomeText, phoneNumberId);
+        await sendWhatsAppMessage(
+            from,
+            BOT_CONFIG.welcomeText,
+            phoneNumberId
+        );
+
         return;
     }
 
-    const existingSession = await getSession(from);
+    // No session or paused session: remain silent
+    if (!session || session.paused) {
+        return;
+    }
 
-    // No session, human takeover pause, or expired session: remain silent.
+    // Inactivity timeout
     if (
-        !existingSession ||
-        existingSession.paused ||
-        Date.now() - existingSession.lastActive > SESSION_TTL_SECONDS * 1000
+        Date.now() - session.lastActive >
+        SESSION_TTL_SECONDS * 1000
     ) {
         await deleteSession(from);
         return;
     }
 
-    const currentPath = Array.isArray(existingSession.path)
-        ? existingSession.path
+    const currentPath = Array.isArray(session.path)
+        ? session.path
         : [];
+
     let reply = '';
 
+    // MAIN MENU: 00 must be checked independently from 0
     if (text === '00' || text === 'menu') {
         if (currentPath.length > 0) {
-            existingSession.path = [currentPath[0]];
-            reply = resolvePath(BOT_CONFIG.tree, existingSession.path)?.node?.prompt
-                || BOT_CONFIG.welcomeText;
+            session.path = [currentPath[0]];
+            reply = getCurrentPrompt(session.path);
         } else {
             reply = BOT_CONFIG.welcomeText;
         }
-    } else if (text === '0' || text === 'back') {
+    }
+
+    // BACK: 0
+    else if (text === '0' || text === 'back') {
         if (currentPath.length > 1) {
-            currentPath.pop();
-            existingSession.path = currentPath;
-            reply = resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt
-                || BOT_CONFIG.welcomeText;
+            session.path = currentPath.slice(0, -1);
+            reply = getCurrentPrompt(session.path);
         } else {
-            existingSession.path = [];
+            session.path = [];
             reply = BOT_CONFIG.welcomeText;
         }
-    } else {
-        const targetMap = currentPath.length === 0
-            ? BOT_CONFIG.tree
-            : (resolvePath(BOT_CONFIG.tree, currentPath)?.children || {});
+    }
+
+    // NORMAL MENU OPTION
+    else {
+        const targetMap = getCurrentTree(currentPath);
 
         let chosenKey = text;
 
         if (currentPath.length === 0) {
-            if (text === 'eng' || text === 'english') chosenKey = '1';
-            if (text === 'guj' || text === 'ગુજરાતી') chosenKey = '2';
+            if (text === 'eng' || text === 'english') {
+                chosenKey = '1';
+            }
+
+            if (text === 'guj' || text === 'ગુજરાતી') {
+                chosenKey = '2';
+            }
         }
 
-        if (Object.prototype.hasOwnProperty.call(targetMap, chosenKey)) {
-            existingSession.path = [...currentPath, chosenKey];
-            reply = resolvePath(BOT_CONFIG.tree, existingSession.path)?.node?.prompt
-                || 'Selected.';
+        if (
+            Object.prototype.hasOwnProperty.call(
+                targetMap,
+                chosenKey
+            )
+        ) {
+            session.path = [...currentPath, chosenKey];
+
+            reply = getCurrentPrompt(session.path);
         } else {
-            // Keep the session active and show the current menu again for an invalid choice.
-            reply = currentPath.length > 0
-                ? resolvePath(BOT_CONFIG.tree, currentPath)?.node?.prompt
-                    || BOT_CONFIG.welcomeText
-                : BOT_CONFIG.welcomeText;
+            // Invalid input pauses only this customer's bot.
+            // No repeated menus and no automatic reply.
+            session.paused = true;
+            session.pauseReason = 'invalid_input';
+
+            await saveSession(from, session);
+            return;
         }
     }
 
-    await saveSession(from, existingSession);
+    await saveSession(from, session);
 
     if (reply) {
         await sendWhatsAppMessage(from, reply, phoneNumberId);
     }
 }
+
+// --------------------------------------------------
+// MAIN WEBHOOK
+// --------------------------------------------------
 
 app.post('/webhook', verifyMetaSignature, async (req, res) => {
     try {
@@ -407,15 +1003,20 @@ app.post('/webhook', verifyMetaSignature, async (req, res) => {
         const messages = await getIncomingMessages(req.body);
 
         for (const item of messages) {
-            await processTextMessage(item.message, item.phoneNumberId);
+            await processTextMessage(
+                item.message,
+                item.phoneNumberId
+            );
         }
 
-        // Always acknowledge handled events, including send failures, to avoid retry loops.
         return res.status(200).send('EVENT_RECEIVED');
-    } catch (error) {
-        console.error('Webhook processing error:', error.message);
 
-        // A non-2xx response allows Meta to retry transient storage failures.
+    } catch (error) {
+        console.error(
+            'Webhook processing error:',
+            error.message
+        );
+
         return res.status(500).send('Webhook processing failed');
     }
 });
