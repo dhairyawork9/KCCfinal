@@ -833,38 +833,61 @@ app.get('/', (req, res) => {
     res.status(200).send('KCC WhatsApp Bot Engine is Active');
 });
 
-// --------------------------------------------------
-// PROCESS CUSTOMER MESSAGE
-// --------------------------------------------------
-// STOP: pause only this customer
-if (text === 'stop' || text === 'exit') {
+ // --------------------------------------------------
+ // PROCESS CUSTOMER MESSAGE
+ // --------------------------------------------------
 
-    // If already paused, stay completely silent
-    if (session?.paused) {
+async function processTextMessage(message, phoneNumberId) {
+    if (
+        !message ||
+        message.type !== 'text' ||
+        !phoneNumberId ||
+        !message.from
+    ) {
         return;
     }
 
-    session = session || {
-        path: [],
-        paused: false
-    };
+    const from = message.from;
+    const messageId = message.id;
+    const text = normalizeText(message.text?.body);
 
-    session.paused = true;
-    session.pauseReason = 'stop';
+    // Ignore duplicate Meta webhook deliveries
+    if (await wasAlreadyHandled(messageId)) {
+        return;
+    }
 
-    await saveSession(from, session);
+    let session = await getSession(from);
 
-    await sendWhatsAppMessage(
-        from,
-        'You have stopped receiving automated messages. Send *START* whenever you want to use the menu again.',
-        phoneNumberId
-    );
+    // STOP: pause only this customer
+    if (text === 'stop' || text === 'exit') {
 
-    return;
-}
+        // Already paused: remain silent
+        if (session?.paused) {
+            return;
+        }
+
+        session = session || {
+            path: [],
+            paused: false
+        };
+
+        session.paused = true;
+        session.pauseReason = 'stop';
+
+        await saveSession(from, session);
+
+        await sendWhatsAppMessage(
+            from,
+            'You have stopped receiving automated messages. Send *START* whenever you want to use the menu again.',
+            phoneNumberId
+        );
+
+        return;
+    }
 
     // START: restart or reactivate this customer
     if (text === 'start') {
+
         if (
             session &&
             !session.paused &&
@@ -897,6 +920,7 @@ if (text === 'stop' || text === 'exit') {
 
     // Inactivity timeout
     if (
+        !session.lastActive ||
         Date.now() - session.lastActive >
         SESSION_TTL_SECONDS * 1000
     ) {
@@ -910,27 +934,29 @@ if (text === 'stop' || text === 'exit') {
 
     let reply = '';
 
-   // MAIN MENU: 00
-if (text === '00' || text === 'menu') {
-    if (session.language) {
-        session.path = [session.language];
-        reply = getCurrentPrompt(session.path);
-    } else {
-        session.path = [];
-        reply = BOT_CONFIG.welcomeText;
-    }
-}
+    // MAIN MENU: 00
+    if (text === '00' || text === 'menu') {
 
-// BACK: 0
-else if (text === '0' || text === 'back') {
-    if (currentPath.length > 1) {
-        session.path = currentPath.slice(0, -1);
-        reply = getCurrentPrompt(session.path);
-    } else {
-        session.path = [];
-        reply = BOT_CONFIG.welcomeText;
+        if (currentPath.length > 0) {
+            session.path = [currentPath[0]];
+            reply = getCurrentPrompt(session.path);
+        } else {
+            session.path = [];
+            reply = BOT_CONFIG.welcomeText;
+        }
     }
-}
+
+    // BACK: 0
+    else if (text === '0' || text === 'back') {
+
+        if (currentPath.length > 1) {
+            session.path = currentPath.slice(0, -1);
+            reply = getCurrentPrompt(session.path);
+        } else {
+            session.path = [];
+            reply = BOT_CONFIG.welcomeText;
+        }
+    }
 
     // NORMAL MENU OPTION
     else {
@@ -957,9 +983,9 @@ else if (text === '0' || text === 'back') {
             session.path = [...currentPath, chosenKey];
 
             reply = getCurrentPrompt(session.path);
+
         } else {
-            // Invalid input pauses only this customer's bot.
-            // No repeated menus and no automatic reply.
+            // Invalid input pauses only this customer
             session.paused = true;
             session.pauseReason = 'invalid_input';
 
@@ -971,7 +997,11 @@ else if (text === '0' || text === 'back') {
     await saveSession(from, session);
 
     if (reply) {
-        await sendWhatsAppMessage(from, reply, phoneNumberId);
+        await sendWhatsAppMessage(
+            from,
+            reply,
+            phoneNumberId
+        );
     }
 }
 
